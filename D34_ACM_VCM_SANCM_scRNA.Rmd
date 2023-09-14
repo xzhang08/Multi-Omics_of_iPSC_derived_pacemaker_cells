@@ -1,0 +1,1579 @@
+---
+title: "D34.Cells"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(RColorBrewer)
+library(scDblFinder)
+library(SummarizedExperiment)
+library(stringr)
+library(tidyr)
+library(ggforce)
+library(cluster)
+library(rBCS)
+library(viridis)
+library(scCustomize)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+
+```{r}
+# Define colors
+custom_colors <- list()
+colors_dutch <- c(
+  '#FFC312','#C4E538','#12CBC4','#FDA7DF','#ED4C67',
+  '#F79F1F','#A3CB38','#1289A7','#D980FA','#B53471',
+  '#EE5A24','#009432','#0652DD','#9980FA','#833471',
+  '#EA2027','#006266','#1B1464','#5758BB','#6F1E51'
+)
+
+colors_spanish <- c(
+  '#40407a','#706fd3','#f7f1e3','#34ace0','#33d9b2',
+  '#2c2c54','#474787','#aaa69d','#227093','#218c74',
+  '#ff5252','#ff793f','#d1ccc0','#ffb142','#ffda79',
+  '#b33939','#cd6133','#84817a','#cc8e35','#ccae62'
+)
+
+custom_colors$discrete <- c(colors_dutch, colors_spanish)
+```
+
+
+```{r}
+## Read the pilot data.
+D34_r0_A.data <- Read10X(data.dir = "/gau/isilon/int/singlecell_runs/211106_10x_iPSCpacemaker/d34_A_r1/outs/filtered_feature_bc_matrix")
+D34_r0_A <- CreateSeuratObject(counts = D34_r0_A.data, project = "D34_r0_A")
+
+D34_r0_P.data <- Read10X(data.dir = "/gau/isilon/int/singlecell_runs/211106_10x_iPSCpacemaker/d34_P_r1/outs/filtered_feature_bc_matrix")
+D34_r0_P <- CreateSeuratObject(counts = D34_r0_P.data, project = "D34_r0_P")
+
+D34_r0_V.data <- Read10X(data.dir = "/gau/isilon/int/singlecell_runs/211106_10x_iPSCpacemaker/d34_V_r1/outs/filtered_feature_bc_matrix")
+D34_r0_V <- CreateSeuratObject(counts = D34_r0_V.data, project = "D34_r0_V")
+```
+
+```{r}
+## Read the D34 study phase data.
+for (file in c("D34_r1_A", "D34_r1_P", "D34_r1_V", "D34_r2_A", "D34_r2_P", "D34_r2_V")){
+        seurat_data <- Read10X(data.dir = paste0("/gau/isilon/int/singlecell_runs/220207_10x_iPSC_pacemaker_studyphase_RNA/", file, "/outs/filtered_feature_bc_matrix"))
+        seurat_obj <- CreateSeuratObject(counts = seurat_data, 
+                                         project = file)
+        assign(file, seurat_obj)
+}
+```
+
+```{r}
+## Merge all D34 samples together
+D34.samples <- merge(D34_r0_A, y = c(D34_r1_A, D34_r2_A, D34_r0_P, D34_r1_P, D34_r2_P, D34_r0_V, D34_r1_V, D34_r2_V), add.cell.ids = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"), project = "D34.samples")
+
+head(colnames(D34.samples))
+table(D34.samples$orig.ident)
+```
+
+```{r}
+# Visualize the number of cell counts per sample
+tmp.meta.data <- D34.samples@meta.data
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = names(sort(table(tmp.meta.data$orig.ident))))
+tmp.meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar() +
+  	#theme_classic() +
+  	theme(axis.text.x = element_text(angle = 0, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = 'none') +
+  	ggtitle("NCells") +
+    scale_fill_manual(values = custom_colors$discrete) +
+    coord_flip() + ylab("Cell Count") + xlab("Sample")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Cell_Counts.pdf", height = 5, width = 6)
+```
+
+```{r}
+# Identify doublets for each sample separately.
+#sce <- data.frame(orig.ident=c(), nCount_RNA=c(),nFeature_RNA=c(),ident=c(),scDblFinder.weighted=c(),scDblFinder.ratio=c(), scDblFinder.score=c(), scDblFinder.class=c())
+sce <- data.frame()
+for(sample in c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V")){
+  tmp_subset <- subset(D34.samples, subset = orig.ident == sample)
+  tmp_sce <- scDblFinder(as.SingleCellExperiment(tmp_subset))
+  sce <- rbind(sce, as.data.frame(colData(tmp_sce)))
+  p1 <- ggplot(as.data.frame(colData(tmp_sce)), aes(x =scDblFinder.class, y = nCount_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(D34.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of transcripts', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+  p2 <- ggplot(as.data.frame(colData(tmp_sce)), aes(x = scDblFinder.class, y = nFeature_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(D34.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of expressed genes', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+  ggsave(
+    paste0("/Data/iPSC_pacemaker/Seurat/D34/QC_ncount_nfeature_by_multiplet_class_",sample,".png"),
+    p1 + p2 + plot_layout(ncol = 2),
+    height = 7, width = 10
+  )
+}
+
+# Check the doublet vs. singlet when putting the results for all samples together.
+p1 <- ggplot(sce, aes(x =scDblFinder.class, y = nCount_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(D34.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of transcripts', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+p2 <- ggplot(sce, aes(x = scDblFinder.class, y = nFeature_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(D34.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of expressed genes', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+ggsave(
+    paste0("/Data/iPSC_pacemaker/Seurat/D34/QC_ncount_nfeature_by_multiplet_class_","all_samples",".png"),
+    p1 + p2 + plot_layout(ncol = 2),
+    height = 7, width = 10
+  )
+
+# Deposit the multiplet class to Seurat Object.
+table(rownames(sce)==rownames(D34.samples@meta.data))
+#sce <- rbind(sce, as.data.frame(colData(sce_D3_r1)))
+#subset_D3_r1 <- subset(D34.samples, subset = orig.ident == "D3_r1")
+#sce_D3_r1 <- scDblFinder(as.SingleCellExperiment(subset_D3_r1))
+#hahaha<-as.SingleCellExperiment(D34.samples)
+
+D34.samples$multiplet_class <- sce$scDblFinder.class
+
+doublet_count <- D34.samples@meta.data %>%
+  filter(multiplet_class != 'singlet') %>%
+  group_by(orig.ident) %>%
+  summarize(count = n()) %>% 
+  as.data.frame() %>%
+  arrange(count)
+
+doublet_count$orig.ident = factor(doublet_count$orig.ident, levels = levels(tmp.meta.data$orig.ident))
+ggplot(doublet_count, aes(x = orig.ident, y = count, fill = orig.ident)) +
+  geom_col(color = 'black') +
+  theme_bw() +
+  scale_fill_manual(values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of doublets', labels = scales::comma) +
+  theme(
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = 'none'
+  ) +
+  coord_flip()
+
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_number_of_doublets_by_sample.pdf", height = 5, width = 6)
+
+# Calculate ratio of doublet.
+tmp.cell.count <- as.data.frame(table(tmp.meta.data$orig.ident))
+doublet_ratio <- merge(doublet_count, tmp.cell.count, by.x = "orig.ident", by.y = "Var1")
+names(doublet_ratio) <- c("orig.ident", "doublet.count", "cell.count")
+doublet_ratio <- mutate(doublet_ratio, doublet.ratio = doublet.count/cell.count)
+doublet_ratio <- arrange(doublet_ratio, doublet.ratio)
+doublet_ratio$orig.ident = factor(doublet_ratio$orig.ident, levels = doublet_ratio$orig.ident)
+
+ggplot(doublet_ratio, aes(x = orig.ident, y = doublet.ratio, fill = orig.ident)) +
+  geom_col(color = 'black') +
+  theme_bw() +
+  scale_fill_manual(values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Proportion of doublets', labels = scales::comma) +
+  theme(
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = 'none'
+  ) +
+  coord_flip()
+
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_proportion_of_doublets_by_sample.pdf", height = 5, width = 6)
+write.table(doublet_ratio, "/Data/iPSC_pacemaker/Seurat/D34/QC_proportion_of_doublets_by_sample.txt", sep = "\t", quote = F, row.names = F)
+```
+
+```{r}
+# Add number of genes per UMI for each cell to metadata
+D34.samples$log10GenesPerUMI <- log10(D34.samples$nFeature_RNA) / log10(D34.samples$nCount_RNA)
+```
+
+
+```{r}
+## Calculate the percentage of reads that map to the mitochondrial genome
+D34.samples[["percent.mt"]] <- PercentageFeatureSet(D34.samples, pattern = "^MT-")
+head(D34.samples@meta.data, 5)
+# Create .RData object to load at any time
+#save(D34.samples, file="/Data/iPSC_pacemaker/Seurat/D34/D34.Samples.seurat.RData")
+#load("/Data/iPSC_pacemaker/Seurat/D34/D34_seurat.RData")
+```
+
+
+```{r}
+# Visualize QC metrics as a violin plot
+median_nFeature <- median(D34.samples$nFeature_RNA)
+# 4556
+mad_nFeature <- mad(D34.samples$nFeature_RNA)
+# [1] 2039.316
+VlnPlot(D34.samples, features = "nFeature_RNA", pt.size = 0, sort = FALSE, cols = custom_colors$discrete) + geom_hline(yintercept = c(500, 1000, 7000, 9000, 10000), linetype = 2) + scale_y_continuous(breaks=seq(0,10000,1000)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/nFeature_RNA.pdf")
+
+median_nCount <- median(D34.samples$nCount_RNA)
+median_nCount
+# 19794
+mad_nCount <- mad(D34.samples$nCount_RNA)
+mad_nCount
+# 15952.78
+VlnPlot(D34.samples, features = "nCount_RNA", pt.size = 0, sort = FALSE, cols = custom_colors$discrete) + geom_hline(yintercept = c(1500, 60000, 80000, 90000, 100000), linetype = 2) + scale_y_continuous(breaks=seq(0,160000,20000)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/nCount_RNA.pdf")
+
+median_percent.mt <- median(D34.samples$percent.mt)
+median_percent.mt
+# 12.82367
+mad_percent.mt <- mad(D34.samples$percent.mt)
+mad_percent.mt
+# 8.394093
+VlnPlot(D34.samples, features = "percent.mt", pt.size = 0, sort = FALSE, cols = custom_colors$discrete) + geom_hline(yintercept = c(30, 40, 50), linetype = 2) + scale_y_continuous(breaks=seq(0,100,20)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/percent.mt.pdf")
+```
+
+
+```{r}
+# Visualize the number UMIs/transcripts per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density") +
+  	geom_vline(xintercept = c(1500, 100000))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/UMI_Counts_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the distribution of genes detected per cell via histogram
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = c(500, 1000, 7000, 9000, 10000))
+  
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/Gene_Counts_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+tmp.meta.data = D34.samples@meta.data
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = unique(tmp.meta.data$orig.ident))
+tmp.meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "orange") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) +
+  	facet_wrap(~orig.ident)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/Cor_UMI&Genes.pdf", width = 20, height = 15)
+```
+
+```{r}
+# Visualize the distribution of mitochondrial gene expression detected per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=percent.mt, fill=orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	#scale_x_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept =c(30,40,50))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/percent.mt_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI
+tmp.meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/Complexity_DensityPlot.pdf")
+```
+
+```{r}
+# Filter out low quality cells using selected thresholds - these will change with experiment
+filtered.D34.samples <- subset(x = D34.samples, 
+                         subset= (nCount_RNA > 1500) &
+                           (nCount_RNA < 100000) &
+                           (nFeature_RNA > 500) &
+                           (nFeature_RNA < 10000) &
+                           (percent.mt < 50))
+```
+
+```{r}
+# Gene-level filtering
+# Extract counts
+counts <- GetAssayData(object = filtered.D34.samples, slot = "counts")
+# Output a logical matrix specifying for each gene on whether or not there are more than zero counts per cell
+nonzero <- counts > 0
+
+# Try different cutoffs to choose a min.cell cutoff.
+ngenes_retained <- c()
+for(i in seq(10,100,10)){
+  tmp_keep_genes <- Matrix::rowSums(nonzero) >= i
+  tmp_filtered_counts <- counts[tmp_keep_genes, ]
+  ngenes_retained <- c(ngenes_retained,dim(tmp_filtered_counts)[1])
+}
+pdf("/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/Min.cell.cutoffs.Vs.NGenes.pdf")
+plot(seq(10,100,10), ngenes_retained, type = "o")
+dev.off()
+
+
+# Decide only keeping those genes expressed in more than 20 cells
+keep_genes <- Matrix::rowSums(nonzero) >= 20
+filtered_counts <- counts[keep_genes, ]
+
+# Reassign to filtered Seurat object
+filtered.D34.samples <- CreateSeuratObject(filtered_counts, meta.data = filtered.D34.samples@meta.data)
+table(filtered.D34.samples@meta.data$orig.ident)
+#D34_r0_A D34_r0_P D34_r0_V D34_r1_A D34_r1_P D34_r1_V D34_r2_A D34_r2_P 
+#    6504     4869     3322     7067     8989    10380     8655     7467 
+#D34_r2_V 
+#    8804 
+write.table(as.data.frame(table(filtered.D34.samples@meta.data$orig.ident)), "/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/NCells_Postfiltering.txt", quote = F, sep = "\t", row.names = F)
+```
+
+
+```{r}
+# Re-assess QC metrics
+
+# Check the number of retained doublets. Turns out most of them retained.
+write.table(as.data.frame(table(filtered.D34.samples@meta.data$orig.ident, filtered.D34.samples@meta.data$multiplet_class)),"/Data/iPSC_pacemaker/Seurat/D34/QC_Metrics/NDoublets_Postfiltering.txt", quote = F, sep = "\t", row.names = F)
+
+# Save filtered subset to new metadata
+metadata_clean <- filtered.D34.samples@meta.data
+
+#Perform all of the same QC plots using the filtered data.
+
+VlnPlot(filtered.D34.samples, features = "nFeature_RNA", pt.size = 0, sort = FALSE, cols = custom_colors$discrete, group.by = "orig.ident") + geom_hline(yintercept = c(500, 1000, 7000, 9000, 10000), linetype = 2) + scale_y_continuous(breaks=seq(0,10000,1000)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/nFeature_RNA.pdf")
+
+VlnPlot(filtered.D34.samples, features = "nCount_RNA", pt.size = 0, sort = FALSE, cols = custom_colors$discrete, group.by = "orig.ident") + geom_hline(yintercept = c(1500, 60000, 80000, 90000, 100000), linetype = 2) + scale_y_continuous(breaks=seq(0,160000,20000)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/nCount_RNA.pdf")
+
+VlnPlot(filtered.D34.samples, features = "percent.mt", pt.size = 0, sort = FALSE, cols = custom_colors$discrete, group.by = "orig.ident") + geom_hline(yintercept = c(30, 40, 50), linetype = 2) + scale_y_continuous(breaks=seq(0,100,20)) + scale_x_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/percent.mt.pdf")
+
+# Visualize the number of cell counts per sample
+tmp.meta.data <- metadata_clean
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = names(sort(table(tmp.meta.data$orig.ident))))
+tmp.meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar() +
+   #geom_text(aes(label = stat(y), group = orig.ident), stat = 'summary', fun = sum, vjust = -1) +
+  	theme_classic() +
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("NCells") +
+    scale_fill_manual(values = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/Cell_Counts.pdf")
+
+# Visualize the number UMIs/transcripts per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density") +
+  	geom_vline(xintercept = c(1500, 80000))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/UMI_Counts_DensityPlot.pdf")
+
+# Visualize the distribution of genes detected per cell via histogram
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = c(500, 1000, 7000, 9000, 10000))
+  
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/Gene_Counts_DensityPlot.pdf")
+
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = unique(tmp.meta.data$orig.ident))
+tmp.meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) +
+  	facet_wrap(~orig.ident)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/Cor_UMI&Genes.pdf")
+
+# Visualize the distribution of mitochondrial gene expression detected per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=percent.mt, fill=orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	#scale_x_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept =c(30,40,50))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/percent.mt_DensityPlot.pdf")
+
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI
+tmp.meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/QCed_Metrics/Complexity_DensityPlot.pdf")
+```
+
+```{r}
+# Create .RData object to load at any time
+save(filtered.D34.samples, file="/Data/iPSC_pacemaker/Seurat/D34/filtered.D34.samples.RData")
+```
+
+```{r}
+# Normalize the counts
+seurat_phase <- NormalizeData(filtered.D34.samples)
+```
+
+Evaluating effects of cell cycle.
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Score cells for cell cycle
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.genes, 
+                                 s.features = s.genes)
+
+## Error
+#Warning: The following features are not present in the object: MLF1IP, not searching for symbol synonyms
+#Warning: The following features are not present in the object: FAM64A, HN1, not searching for symbol synonyms
+
+# Manually check the ENSG ID for these three genes and found that:
+## MLF1IP is CENPU in our reference (ENSG00000151725)
+## FAM64A is PIMREG in our reference (ENSG00000129195)
+## HN1 is JPT1 in our reference (ENSG00000189159)
+
+intersect(c("FAM64A", "HN1", "MLF1IP"), s.genes)
+#[1] "MLF1IP"
+intersect(c("FAM64A", "HN1", "MLF1IP"), g2m.genes)
+#[1] "FAM64A" "HN1"
+
+# Manually change the names of these cell cycle genes.
+s.genes[s.genes=="MLF1IP"] = "CENPU"
+g2m.genes[g2m.genes=="FAM64A"] = "PIMREG"
+g2m.genes[g2m.genes=="HN1"] = "JPT1"
+
+# Redo score cells for cell cycle
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.genes, 
+                                 s.features = s.genes)
+# Calculate the percentage of cells in different phases.
+phase_count <- table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase)
+phase_per <- prop.table(table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase), 1)*100
+write.table(phase_count, "/Data/iPSC_pacemaker/Seurat/D34/Covariates/CellCyclePhaseCount.txt", quote = F, sep = "\t")
+write.table(phase_per, "/Data/iPSC_pacemaker/Seurat/D34/Covariates/CellCyclePhasePercentage.txt", quote = F, sep = "\t")
+
+# Visualize the distribution of cell cycle markers across
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "Phase", ncol = 2) & scale_fill_manual(values = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/Cell.cycle.markers.by.phase.pdf")
+
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "orig.ident", ncol = 2) & scale_y_discrete(limits = rev(c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))) & scale_fill_manual(values = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/Cell.cycle.markers.by.sample.pdf")
+```
+
+```{r}
+# Identify the most variable genes
+seurat_phase <- FindVariableFeatures(seurat_phase, 
+                     selection.method = "vst",
+                     nfeatures = 4000, 
+                     verbose = FALSE)
+		     
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+
+# Perform PCA
+seurat_phase <- RunPCA(seurat_phase, ndims.print = 1:40, nfeatures.print = 10)
+
+# Run UMAP
+seurat_phase <- RunUMAP(seurat_phase, dims = 1:40)
+
+# Plot the UMAP colored by cell cycle phase
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/SplitCellCyclePlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/MergedCellCyclePlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        group.by= "orig.ident") + scale_color_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/MergedCellCyclePlot_Samples.pdf")
+
+#DimHeatmap(seurat_phase, dims = c(8, 10))
+```
+We do see large differences due to cell cycle. Based on this plot, we would regress out the variation due to cell cycle.
+
+Evaluating effects of mitochodrial expression.
+```{r}
+# Check quartile values
+summary(seurat_phase@meta.data$percent.mt)
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.000   8.459  12.831  14.155  18.262  49.982 
+# Turn mitoRatio into categorical factor vector based on quartile values
+seurat_phase@meta.data$mitoFr <- cut(seurat_phase@meta.data$percent.mt, 
+                   breaks=c(-Inf, 8.459, 12.831, 18.262, Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+
+# Plot the PCA colored by mitoFr
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr",
+        split.by = "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/SplitMitoFrPlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/Covariates/MergedMitoFrPlot.pdf")
+```
+We do not see large differences due to mitochondrial percentage for the same Tissue. Based on this plot, we would not regress out the variation due to mitochondrial percentage.
+
+Add cell cycle score to filtered.D34.samples for SCTransform.
+```{r}
+table(rownames(seurat_phase@meta.data)==rownames(filtered.D34.samples@meta.data))
+filtered.D34.samples@meta.data <- mutate(filtered.D34.samples@meta.data, S.Score = seurat_phase@meta.data$S.Score, G2M.Score = seurat_phase@meta.data$G2M.Score, Phase = seurat_phase@meta.data$Phase)
+```
+
+Apply sctransform normalization while regress out cell cycle scoring.
+```{r}
+# SCTranform
+## Adjust the limit for allowable object sizes within R (Default is 500 * 1024 ^ 2 = 500 Mb) using the following code:
+#options(future.globals.maxSize = 10000 * 1024^2)
+filtered.D34.samples <- SCTransform(filtered.D34.samples, method = "glmGamPoi", vars.to.regress = c("G2M.Score", "S.Score"), variable.features.n = 5000)
+
+# Save the seurat object
+saveRDS(filtered.D34.samples, "/Data/iPSC_pacemaker/Seurat/D34/SCTransform.filtered.D34.samples.rds")
+
+#filtered.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/D34/SCTransform.filtered.samples.rds")
+```
+
+
+```{r}
+filtered.D34.samples <- RunPCA(filtered.D34.samples)
+DimPlot(filtered.D34.samples, reduction = "pca", group.by = "orig.ident", cols = custom_colors$discrete) + scale_color_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/PCs/MergedPCAPlot.pdf")
+
+filtered.D34.samples$orig.ident <- factor(filtered.D34.samples$orig.ident, levels = unique(filtered.D34.samples$orig.ident))
+
+DimPlot(filtered.D34.samples, reduction = "pca", split.by = "orig.ident", group.by = "orig.ident", cols = custom_colors$discrete) + scale_color_discrete(limits = c("D34_r0_A", "D34_r1_A", "D34_r2_A", "D34_r0_P", "D34_r1_P", "D34_r2_P", "D34_r0_V",  "D34_r1_V",  "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/PCs/SplitPCAPlot.pdf", width = 30, height = 5)
+```
+
+Determining how many PCs to include in the clustering step to ensure that we are capturing the majority of the variation, or cell types, present in our dataset.
+```{r}
+# Explore heatmap of PCs
+pdf("/Data/iPSC_pacemaker/Seurat/D34/PCs/HeatmapOfPCs_1_12.pdf", width = 25, height = 15)
+#DimHeatmap(filtered.D34.samples, dims = 1:25, cells = 500, balanced = TRUE, fast = FALSE)
+DimHeatmap(filtered.D34.samples, dims = 1:12, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34/PCs/HeatmapOfPCs_13_24.pdf", width = 25, height = 15)
+DimHeatmap(filtered.D34.samples, dims = 13:24, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34/PCs/HeatmapOfPCs_25_36.pdf", width = 25, height = 15)
+DimHeatmap(filtered.D34.samples, dims = 25:36, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34/PCs/HeatmapOfPCs_37_48.pdf", width = 25, height = 15)
+DimHeatmap(filtered.D34.samples, dims = 37:48, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34/PCs/HeatmapOfPCs_49_50.pdf", width = 25, height = 15)
+DimHeatmap(filtered.D34.samples, dims = 49:50, cells = 500, balanced = TRUE)
+dev.off()
+
+# Plot the elbow plot
+ElbowPlot(object = filtered.D34.samples, ndims = 50)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/PCs/ElbowPlot.pdf")
+```
+Decision: Use the first 40 PCs to generate the clusters.
+
+Cluster the cells
+```{r}
+# Determine the K-nearest neighbor graph
+filtered.D34.samples <- FindNeighbors(object = filtered.D34.samples, 
+                                dims = 1:40)
+                                
+# Determine the clusters for various resolutions                                
+filtered.D34.samples <- FindClusters(object = filtered.D34.samples,
+                               resolution = c(0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(filtered.D34.samples), 5)
+
+# Count the number of clusters at different resolutions.
+Ncluster <- c()
+for(res in c(12:21)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(filtered.D34.samples@meta.data[,res]))))
+#unique(filtered.D34.samples@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = c(0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/Seurat/D34/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+```
+
+Run non-linear dimensional reduction (UMAP/tSNE)
+```{r}
+filtered.D34.samples <- RunUMAP(filtered.D34.samples, dims = 1:40)
+
+# Plot the UMAP
+# Assign identity of clusters
+Idents(object = filtered.D34.samples) <- "SCT_snn_res.0.6"
+DimPlot(filtered.D34.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/UMAP.res.0.6.pdf", width = 10, height = 8)
+```
+Decision: Use resolution 0.6.
+
+Segregation of clusters by sample
+```{r}
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(filtered.D34.samples, 
+                     vars = c("ident", "orig.ident")) %>%
+        dplyr::count(ident, orig.ident) %>%
+        tidyr::spread(ident, n)
+
+write.table(n_cells,"/Data/iPSC_pacemaker/Seurat/D34/UMAP/N_Cells_For_Each_Clusters.txt", quote = F, sep = "\t", row.names = F)
+
+# UMAP of cells in each cluster by sample
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        split.by = "orig.ident")  + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/SplitSamples.UMAP.res.0.6.pdf", width = 40, height = 5)
+
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        #cols = DiscretePalette(12, palette = "stepped")[c(1,5,9,3,7,11,4,8,12)],
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/MergedSamples.UMAP.res.0.6.pdf", width = 10, height = 8)
+
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        cols = custom_colors$discrete,
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/MergedSamples.UMAP.res.0.6.diff.colors.pdf", width = 10, height = 8)
+
+# UMAP of cells in each cluster by Tissue
+filtered.D34.samples@meta.data <- mutate(filtered.D34.samples@meta.data, 
+                                               Tissue = case_when(str_detect(as.vector(filtered.D34.samples@meta.data$orig.ident), "_A") ~ "D34_Atrial", 
+                                                                  str_detect(as.vector(filtered.D34.samples@meta.data$orig.ident), "_P") ~ "D34_Pacemaker", 
+                                                                  str_detect(as.vector(filtered.D34.samples@meta.data$orig.ident), "_V") ~ "D34_Ventricular"))
+
+
+filtered.D34.samples$Tissue <- factor(filtered.D34.samples$Tissue, levels = unique(filtered.D34.samples$Tissue))
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        split.by = "Tissue",
+        group.by = "Tissue")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Split.Tissues.UMAP.res.0.6.pdf", width = 30, height = 5)
+
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        #cols = brewer.pal(6,"Dark2"),
+        group.by = "Tissue")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Merged.Tissues.UMAP.res.0.6.pdf", width = 10, height = 8)
+
+```
+
+Segregation of clusters by cell cycle phase
+```{r}
+# Explore whether clusters segregate by cell cycle phase
+DimPlot(filtered.D34.samples,
+        group.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Merged.CellCycle.UMAP.res.0.6.pdf", width = 10, height = 8)
+DimPlot(filtered.D34.samples,
+        group.by = "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Split.CellCycle.UMAP.res.0.6.pdf", width = 25, height = 10)
+```
+
+Segregation of clusters by multiplet class.
+```{r}
+# Explore whether clusters segregate by singlet vs doublet.
+DimPlot(filtered.D34.samples,
+        group.by = "multiplet_class")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Merged.Multiplet.UMAP.res.0.6.pdf", width = 10, height = 8)
+DimPlot(filtered.D34.samples,
+        group.by = "multiplet_class",
+        split.by = "multiplet_class")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Split.Multiplet.UMAP.res.0.6.pdf", width = 10, height = 5)
+```
+
+Segregation of clusters by various sources of uninteresting variation
+```{r}
+# Determine metrics to plot present in seurat_integrated@meta.data
+metrics <-  c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "percent.mt")
+
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = metrics,
+            pt.size = 0.4, 
+            order = TRUE,
+            #min.cutoff = 'q10',
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Metrics.UMAP.res.0.6.pdf", width = 10, height = 10)
+```
+
+Exploring known cell type markers
+```{r}
+# Pan-Cardiac genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("NKX2-5", "TNNT2", "MYH6", "MYH7"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Pan_Cardiac_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+# Violin plot
+VlnPlot(filtered.D34.samples, c("NKX2-5", "TNNT2", "MYH6", "MYH7"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 4)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Pan_Cardiac_Genes.Violin.UMAP.res.0.6.pdf", width = 16, height = 5)
+
+# Pacemaker cell genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("TBX18", "SHOX2", "ISL1", "TBX3"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/PacemakerCell_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+# Violin plot
+VlnPlot(filtered.D34.samples, c("TBX18", "SHOX2", "ISL1", "TBX3"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 4)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/PacemakerCell_Genes.Violin.UMAP.res.0.6.pdf", width = 16, height = 5)
+
+# Ion channel and connexin genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("HCN4", "KCNJ3", "GJD3"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/IonChannel_Connexin_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.D34.samples, c("HCN4", "KCNJ3", "GJD3"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/IonChannel_Connexin_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# Ventricular genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("MYL2", "HEY2", "IRX4"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "orange"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Ventricular_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.D34.samples, c("MYL2", "HEY2", "IRX4"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Ventricular_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# Atrial genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("MYL7", "NPPA", "NR2F2"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "darkgreen"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Atrial_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.D34.samples, c("MYL7", "NPPA", "NR2F2"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/Atrial_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# AV nodal genes
+FeaturePlot(filtered.D34.samples, 
+            reduction = "umap", 
+            features = c("MSX2", "TBX2"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "purple"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/AV_Nodal_Genes.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+VlnPlot(filtered.D34.samples, c("MSX2", "TBX2"), group.by = "Tissue", pt.size = 0, cols = custom_colors$discrete, ncol = 2)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/AV_Nodal.Violin.UMAP.res.0.6.pdf", width = 8, height = 5)
+```
+
+```{r}
+DotPlot(filtered.D34.samples, features = rev(c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2")), cols= "Spectral", group.by = "Tissue") + RotatedAxis() + coord_flip()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/James_Markers_DotPlot.UMAP.res.0.6.pdf", width = 8, height = 6)
+```
+
+```{r}
+# Single cell heatmap of feature expression
+DoHeatmap(filtered.D34.samples, features = c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2"), size = 3, group.by = "Tissue")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/James_Markers_Heatmap.UMAP.res.0.6.pdf")
+```
+
+
+```{r}
+# Save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+saveRDS(filtered.D34.samples, file = "/Data/iPSC_pacemaker/Seurat/D34/Clustered.filtered.D34.samples.rds")
+
+filtered.D34.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/D34/Clustered.filtered.D34.samples.rds")
+```
+
+Composition of samples and clusters
+```{r}
+table_samples_by_clusters <- filtered.D34.samples@meta.data %>%
+  group_by(orig.ident, SCT_snn_res.0.6) %>%
+  summarize(count = n()) %>%
+  spread(SCT_snn_res.0.6, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  dplyr::select(c('orig.ident', 'total_cell_count', everything())) %>%
+  arrange(factor(orig.ident, levels = levels(filtered.D34.samples@meta.data$orig.ident)))
+write.table(as.data.frame(table_samples_by_clusters), "/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_samples_by_clusters.txt", quote = F, sep = "\t")
+
+table_clusters_by_samples <- filtered.D34.samples@meta.data %>%
+  dplyr::rename('cluster' = 'SCT_snn_res.0.6') %>%
+  group_by(cluster, orig.ident) %>%
+  summarize(count = n()) %>%
+  spread(orig.ident, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  select(c('cluster', 'total_cell_count', everything())) %>%
+  arrange(factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6)))
+write.table(as.data.frame(table_clusters_by_samples), "/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_samples.txt", quote = F, sep = "\t")
+
+# Plot number of cells.
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = levels(filtered.D34.samples@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 3, angle = 0
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of cells', labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_samples_by_clusters_cell_number.pdf", p1, width = 8, height = 5)
+
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(SCT_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = SCT_snn_res.0.6)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_samples_cell_number.pdf", p2, width = 10, height = 5)
+
+# Plot percent of cells.
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = levels(filtered.D34.samples@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_samples_by_clusters_cell_percent.pdf", p1, width = 8, height = 5)
+
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(SCT_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = SCT_snn_res.0.6)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels, aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_samples_cell_percent.pdf", p2, width = 10, height = 5)
+```
+
+Composition of Tissues and clusters
+```{r}
+table_Tissues_by_clusters <- filtered.D34.samples@meta.data %>%
+  group_by(Tissue, SCT_snn_res.0.6) %>%
+  summarize(count = n()) %>%
+  spread(SCT_snn_res.0.6, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  dplyr::select(c('Tissue', 'total_cell_count', everything())) %>%
+  arrange(factor(Tissue, levels = levels(filtered.D34.samples@meta.data$Tissue)))
+write.table(as.data.frame(table_Tissues_by_clusters), "/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_Tissues_by_clusters.txt", quote = F, sep = "\t")
+
+table_clusters_by_Tissues <- filtered.D34.samples@meta.data %>%
+  dplyr::rename('cluster' = 'SCT_snn_res.0.6') %>%
+  group_by(cluster, Tissue) %>%
+  summarize(count = n()) %>%
+  spread(Tissue, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  select(c('cluster', 'total_cell_count', everything())) %>%
+  arrange(factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6)))
+write.table(as.data.frame(table_clusters_by_Tissues), "/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_Tissues.txt", quote = F, sep = "\t")
+
+# Plot number of cells.
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(Tissue) %>%
+  tally()
+
+p1 <- table_Tissues_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'Tissue') %>%
+  mutate(Tissue = factor(Tissue, levels = levels(filtered.D34.samples@meta.data$Tissue))) %>%
+  ggplot(aes(Tissue, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = Tissue, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 3, angle = 0
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of cells', labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_Tissues_by_clusters_cell_number.pdf", p1, width = 4, height = 5)
+
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(SCT_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = SCT_snn_res.0.6)
+
+p2 <- table_clusters_by_Tissues %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Tissue', values = custom_colors$discrete) +
+  scale_y_continuous(labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_Tissues_cell_number.pdf", p2, width = 10, height = 5)
+
+# Plot percent of cells.
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(Tissue) %>%
+  tally()
+
+p1 <- table_Tissues_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'Tissue') %>%
+  mutate(Tissue = factor(Tissue, levels = levels(filtered.D34.samples@meta.data$Tissue))) %>%
+  ggplot(aes(Tissue, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = Tissue, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_Tissues_by_clusters_cell_percent.pdf", p1, width = 4, height = 5)
+
+temp_labels <- filtered.D34.samples@meta.data %>%
+  group_by(SCT_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = SCT_snn_res.0.6)
+
+p2 <- table_clusters_by_Tissues %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = levels(filtered.D34.samples@meta.data$SCT_snn_res.0.6))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels, aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Tissue', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34/UMAP/table_clusters_by_Tissues_cell_percent.pdf", p2, width = 10, height = 5)
+```
+
+
+Silhouette plot
+```{r}
+
+filtered.D34.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/D34_First/Clustered.filtered.samples.rds")
+
+filtered.D34.samples <- FindClusters(object = filtered.D34.samples,
+                               resolution = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+filtered.D34.samples@meta.data <- select(filtered.D34.samples@meta.data, c(1:10,19,20,21:32,11,33,12,13,14,34,15:18,35))
+
+distance_matrix <- dist(Embeddings(filtered.D34.samples[['pca']])[, 1:40])
+
+sil_score_matrix <- matrix(NA, nrow=dim(filtered.D34.samples@meta.data)[1], ncol=23)
+for(i in 13:35){
+  clusters <- filtered.D34.samples@meta.data[,i]
+  silhouette <- silhouette(as.numeric(clusters), dist = distance_matrix)
+  sil_score_matrix[,i-12] <- silhouette[,3]
+}
+
+colnames(sil_score_matrix) = paste0("silhouette_score_res.", c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+filtered.D34.samples@meta.data <- cbind(filtered.D34.samples@meta.data, sil_score_matrix)
+
+#filtered.D34.samples@meta.data <- select(filtered.D34.samples@meta.data, -35)
+
+for(i in 36:58){
+#for(i in 35){
+  mean_silhouette_score <- mean(filtered.D34.samples@meta.data[,i])
+  tmp <- select(filtered.D34.samples@meta.data, c(i-23, i))
+  colnames(tmp) <- c("Cluster", "Sil_score")
+  tmp <- mutate(tmp, barcode =  rownames(tmp))
+  tmp <- arrange(tmp, Cluster, desc(Sil_score))
+  tmp$barcode = factor(tmp$barcode, levels = tmp$barcode)
+  p <- 
+    ggplot(tmp) +
+    #geom_col(aes(barcode, filtered.D34.samples@meta.data[,i], fill = filtered.D34.samples@meta.data)[,i-24], show.legend = TRUE) +
+    geom_col(aes(barcode, Sil_score, fill = Cluster), show.legend = TRUE) +
+    geom_hline(yintercept = mean_silhouette_score, color = 'red', linetype = 'dashed') +
+    #scale_x_discrete(name = 'Cells') +
+    xlab("Clusters") +
+    ylab("Silhouette Score") +
+    #scale_y_continuous(name = 'Silhouette score') +
+    scale_fill_manual(values = custom_colors$discrete, name = 'Clusters') +
+    theme_bw() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+    ggsave(paste0("/Data/iPSC_pacemaker/Seurat/D34_First/PCs/silhouette_plot_", names(filtered.D34.samples@meta.data)[i], ".pdf"), p, height = 5, width = 8)
+}
+
+tmp_score <- select(filtered.D34.samples@meta.data, 36:58)
+library(reshape2)
+long_tmp_score <- melt(tmp_score)
+
+long_tmp_score$variable = str_replace(long_tmp_score$variable, "silhouette_score_res.", "")
+
+library(ggpubr)
+ggviolin(long_tmp_score, "variable", "value", fill = "variable", orientation = "horiz", 
+   palette = custom_colors$discrete,
+   add = "boxplot", add.params = list(fill = "white"), xlab = "Resolution", ylab = "Silhouette Score", legend = "right")
+
+ggviolin(long_tmp_score, "variable", "value", fill = "variable",
+   palette = custom_colors$discrete,
+   xlab = "Resolution", ylab = "Silhouette Score", legend = "right")
+
+ggviolin(long_tmp_score, "variable", "value", fill = "variable", size = 0.001, 
+   palette = custom_colors$discrete,
+   add = "boxplot", add.params = list(fill = "white"), xlab = "Resolution", ylab = "Silhouette Score", legend = "right") + rotate_x_text(angle = 45)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/PCs/silhouette_violin_plot.pdf", width = 10, height = 5)
+
+
+require(rBCS)
+
+filtered.D34.samples@meta.data$Tissue <- str_replace(filtered.D34.samples@meta.data$Tissue, "D34_", "")
+ExportSeurat(filtered.D34.samples, "/Data/iPSC_pacemaker/Seurat/D34_First/More_Res_Clustered.filtered.D34.samples.bcs")
+
+Ncluster <- c()
+for(res in c(13:35)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(filtered.D34.samples@meta.data[,res]))))
+#unique(filtered.D34.samples@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/Seurat/D34_First/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+
+write.table(as.data.frame(colMeans(tmp_score)),"/Data/iPSC_pacemaker/Seurat/D34_First/PCs/ResolutionVsMean_Sil_Score.txt", quote = F, sep = "\t", row.names = T)
+colMeans(tmp_score)
+write.table(as.data.frame(apply(tmp_score,2,median)),"/Data/iPSC_pacemaker/Seurat/D34_First/PCs/ResolutionVsMedian_Sil_Score.txt", quote = F, sep = "\t", row.names = T)
+
+```
+
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+filtered.D34.samples.markers <- FindAllMarkers(filtered.D34.samples, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(filtered.D34.samples.markers, file="/Data/iPSC_pacemaker/Seurat/D34/UMAP/FindAllMarkers.RData")
+
+write.table(as.data.frame(filtered.D34.samples.markers),"/Data/iPSC_pacemaker/Seurat/D34/UMAP/FindAllMarkers.txt", quote = F, sep = "\t")
+
+### This version of results were later move to "/Data/iPSC_pacemaker/Seurat/D34_First/". The original folder "/Data/iPSC_pacemaker/Seurat/D34/" was used for lenient criteria results. Jun 13 2022.
+load("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/FindAllMarkers.RData")
+
+ls()
+#[1] "filtered.samples.markers"
+
+filtered.pacemaker.samples.markers.fdr <- filter(filtered.samples.markers, p_val_adj < 0.01)
+
+dim(filtered.pacemaker.samples.markers.fdr)
+#[1] 25568     7
+dim(filtered.samples.markers)
+#[1] 26027     7
+
+
+
+filtered.pacemaker.samples.markers.fdr %>%
+    group_by(cluster) %>%
+    top_n(n = 100, wt = avg_log2FC) -> top100
+
+write.table(as.data.frame(top100),"/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/FindAllMarkers_top100.txt", quote = F, sep = "\t")
+
+####
+#filtered.pacemaker.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.pacemaker.samples.markers.fdr$cluster))
+top100list <- matrix(0, nrow = 100, ncol = 26)
+top100_df <- as.data.frame(top100)
+for(i in seq(0,25,1)){
+  j <- i+1
+  top100list[,j] <- top100_df[top100_df$cluster == i,7]
+}
+colnames(top100list) <- paste0("C_", seq(0,25,1))
+
+#top100list <- select(as.data.frame(top100list), c("C_18","C_6","C_8","C_3","C_15","C_13","C_21","C_12","C_5","C_2","C_10","C_9","C_16","C_26","C_27","C_19","C_20","C_1","C_24","C_23","C_25","C_17","C_22","C_14","C_4","C_7","C_11","C_0"))
+
+write.table(as.data.frame(top100list),"/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/FindAllMarkers_top100list.txt", quote = F, sep = "\t", row.names = F)
+```
+
+Create one column in the meta data of seurat object to label cell types.
+```{r}
+filtered.D34.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/D34_First/Clustered.filtered.samples.rds")
+filtered.D34.samples@meta.data = mutate(filtered.D34.samples@meta.data,  CellType = case_when(SCT_snn_res.0.6 == "21" ~ "Endoderm Cells", SCT_snn_res.0.6 == "23" ~ "iPSCs", SCT_snn_res.0.6 == "19" | SCT_snn_res.0.6 == "13" ~ "Endocardial Cells", SCT_snn_res.0.6 == "17" ~ "Mesoderm Cells", SCT_snn_res.0.6 == "25" ~ "Proepicardial Cells", SCT_snn_res.0.6 == "24" ~ "Visceral Neurons", SCT_snn_res.0.6 == "20" ~ "Unknown", TRUE ~ "Cardiomyocytes"))
+
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        cols = paletteer_d("ggsci::category10_d3")[c(1:6,8,7)],
+        repel = TRUE,
+        group.by = "CellType")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/CellType.UMAP.pdf", width = 10, height = 8)
+
+DimPlot(filtered.D34.samples, 
+        label = TRUE, 
+        #cols = paletteer_d("ggsci::default_igv"),
+        cols = custom_colors$discrete,
+        repel = TRUE,
+        group.by = "SCT_snn_res.0.6")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/SCT_snn_res.0.6.UMAP_Custom_Colors.pdf", width = 10, height = 8)
+```
+
+Plot marker genes only for some clusters.
+```{r}
+### Plot top 5 markers for each cluster.
+load("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/FindAllMarkers.RData")
+filtered.samples.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC) -> top5
+
+top5_select = filter(top5, cluster == "2" | cluster == "7" | cluster == "9" | cluster == "15" | cluster == "0" | cluster == "6" | cluster == "8" | cluster == "12" | cluster == "1")
+
+tmp_top5_select <- arrange(top5_select, factor(cluster, levels = c("2", "7", "9", "15", "0", "6", "8", "12", "1")), desc(cluster))
+
+filtered.D34.samples.select = subset(x = filtered.D34.samples, idents = c("2", "7", "9", "15", "0", "6", "8", "12", "1"))
+filtered.D34.samples.select$SCT_snn_res.0.6 = factor(filtered.D34.samples.select$SCT_snn_res.0.6, levels= c("2", "7", "9", "15", "0", "6", "8", "12", "1"))
+Idents(filtered.D34.samples.select) <- "SCT_snn_res.0.6"
+
+#DotPlot(filtered.D34.samples.select, features = unique(tmp_top5_select$gene), cols= c("white","#9632B8"), cluster.idents = FALSE) + RotatedAxis() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) + xlab("Genes") + ylab("Clusters")
+#ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Top5.markers_dotplot_select_clusters.pdf", width = 9, height = 5)
+
+DotPlot_scCustom(filtered.D34.samples.select, features = unique(tmp_top5_select$gene), flip_axes = T, remove_axis_titles = FALSE) + xlab("Genes") + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Top5.markers_dotplot_select_clusters_2.pdf", width = 6, height = 7)
+
+
+### Plot top 10 markers for each cluster.
+filtered.samples.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+
+top10_select = filter(top10, cluster == "2" | cluster == "7" | cluster == "9" | cluster == "15" | cluster == "0" | cluster == "6" | cluster == "8" | cluster == "12" | cluster == "1")
+
+tmp_top10_select <- arrange(top10_select, factor(cluster, levels = c("2", "7", "9", "15", "0", "6", "8", "12", "1")), desc(cluster))
+
+DotPlot(filtered.D34.samples.select, features = unique(tmp_top10_select$gene), cols= c("white","Blue"), cluster.idents = FALSE) + RotatedAxis() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Top10.markers_dotplot_select_clusters.pdf", width = 12, height = 5)
+```
+
+
+```{r}
+DoHeatmap(filtered.D34.samples, features = unique(top5$gene))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Top5.markers_heatmap.pdf", width = 12, height = 5)
+```
+
+```{r}
+#FeaturePlot_scCustom(filtered.D34.samples, features = c("TBX18", "SHOX2", "ISL1", "TBX3"), colors_use = viridis(n = 10, option = "D"), order = FALSE, na_cutoff = NA)
+FeaturePlot_scCustom(filtered.D34.samples, features = c("TBX18", "SHOX2", "ISL1", "TBX3"), colors_use = viridis(n = 10, option = "D"), order = FALSE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Pacemaker_Genes.UMAP.png", width = 12, height = 10)
+
+FeaturePlot_scCustom(filtered.D34.samples, features = c("MYL7", "NPPA", "NR2F2", "MYL4", "MYL2", "HEY2", "IRX4", "MYH7", "HOPX"), colors_use = viridis(n = 10, option = "D"), order = FALSE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Atrial_Ventricular_Genes.UMAP.png", width = 10, height = 10)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Atrial_Ventricular_Genes.UMAP.pdf", width = 10, height = 10)
+```
+
+Stacked Violin Plots
+```{r}
+# Create Plots
+#Stacked_VlnPlot(filtered.D34.samples.select, features = c("TBX18", "SHOX2", "ISL1", "TBX3"), x_lab_rotate = FALSE, colors_use = brewer.pal(9, "Set1")[9:1], plot_spacing = 0)
+#ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Pacemaker_Genes.StackedViolin.pdf", width = 6, height = 5)
+
+VlnPlot(filtered.D34.samples.select, features = c("TBX18", "SHOX2", "ISL1", "TBX3"), stack = TRUE, cols = paletteer_d("ggthemes::excel_Badge")[6:3], flip = TRUE) + theme(legend.position = "none") + ggtitle("Identity on y-axis")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Pacemaker_Genes.StackedViolin.2.pdf", width = 6, height = 5)
+
+VlnPlot(filtered.D34.samples.select, features = c("MYL7", "NPPA", "NR2F2", "MYL4", "MYL2", "HEY2", "IRX4", "MYH7", "HOPX"), stack = TRUE, cols = paletteer_d("ggsci::category10_d3"), flip = TRUE) + theme(legend.position = "none") + ggtitle("Identity on y-axis")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/UMAP/Atrial_Ventricular_Genes.StackedViolin.pdf", width = 10, height = 10)
+```
+
+
+Differential expression testing between atrial cells and SANCMs using RNA assay.
+```{r}
+# Create one column in the meta data storing the info for comparision.
+filtered.D34.samples@meta.data = mutate(filtered.D34.samples@meta.data,  CMCellType = case_when(SCT_snn_res.0.6 == "2" | SCT_snn_res.0.6 == "7" | SCT_snn_res.0.6 == "9" | SCT_snn_res.0.6 == "15" ~ "VCM", SCT_snn_res.0.6 == "0" | SCT_snn_res.0.6 == "6" | SCT_snn_res.0.6 == "8" | SCT_snn_res.0.6 == "12" ~ "ACM", SCT_snn_res.0.6 == "1" ~ "PC", TRUE ~ "Other"))
+table(filtered.D34.samples$CMCellType, filtered.D34.samples$SCT_snn_res.0.6)
+
+Idents(object = filtered.D34.samples) <- "CMCellType"
+
+DefaultAssay(filtered.D34.samples) <- "RNA"
+
+filtered.D34.samples <- NormalizeData(filtered.D34.samples, normalization.method = "LogNormalize", scale.factor = 10000)
+
+PC_vs_ACM_RNA <- FindMarkers(filtered.D34.samples, ident.1 = "PC", ident.2 = "ACM", min.pct = 0.25, assay = "RNA", slot = "data")
+
+PC_vs_ACM_RNA_DE <- filter(PC_vs_ACM_RNA, abs(avg_log2FC) > 0.25 & p_val_adj < 0.05)
+
+write.table(PC_vs_ACM_RNA_DE,"/Data/iPSC_pacemaker/Seurat/D34_First/DE/DE_PC_vs_ACM_RNA_fdr0.05_log2fc0.5_wilcox.txt", quote = F, sep = "\t", row.names = T)
+
+# Get background genes.
+PC_vs_ACM_RNA_bg <- FindMarkers(filtered.D34.samples, ident.1 = "PC", ident.2 = "ACM", min.pct = 0.25, assay = "RNA", slot = "data", logfc.threshold = 0)
+
+write.table(PC_vs_ACM_RNA_bg,"/Data/iPSC_pacemaker/Seurat/D34_First/DE/DE_PC_vs_ACM_RNA_bg.txt", quote = F, sep = "\t", row.names = T)
+
+# Single cell heatmap of feature expression
+PC_vs_ACM_RNA_DE_order <- arrange(PC_vs_ACM_RNA_DE, avg_log2FC)
+
+filtered.D34.samples.PCvsACM <- subset(filtered.D34.samples, idents = c("PC", "ACM"))
+mat<- filtered.D34.samples.PCvsACM[["RNA"]]@data[rownames(PC_vs_ACM_RNA_DE_order),] %>% as.matrix()
+
+## scale the rows
+mat<- t(scale(t(mat)))
+cluster_anno<- filtered.D34.samples.PCvsACM@meta.data$CMCellType
+### Annotate certain genes.
+ha = rowAnnotation(foo = anno_mark(at = c(1, 4, 11, 31, 49, 131, 167, 181, 191, 217, 222), labels = c("NPPB", "NPPA", "MYL3", "MYL7", "MYL6", "TBX5", "TBX3", "MYH11", "FOS", "TBX18", "SHOX2")))
+#ha = rowAnnotation(foo = anno_mark(at = c(1, 4, 11, 31, 49, 131, 167, 181, 191, 217, 222), labels = c("NPPB", "NPPA", "MYL3", "MYL7", "MYL6", "TBX5", "TBX3", "MYH11", "FOS", "TBX18", "SHOX2")), bar = anno_barplot(PC_vs_ACM_DE_order$avg_log2FC))
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/DE/PC_vs_ACM_RNA.pdf", height = 10, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = gpar(fontsize = 4),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("PC" = "red", "ACM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c("#6A6599", "#79AF97")))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(PC_vs_ACM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c("#109618", "#F7FAFF", "#990099")))
+draw(ht)
+dev.off()
+```
+
+
+Differential expression testing between ventricular cells and SANCMs.
+```{r}
+# Create one column in the meta data storing the info for comparision.
+PC_vs_VCM <- FindMarkers(filtered.D34.samples, ident.1 = "PC", ident.2 = "VCM", min.pct = 0.25)
+PC_vs_VCM_DE <- filter(PC_vs_VCM, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+
+write.table(PC_vs_VCM_DE,"/Data/iPSC_pacemaker/Seurat/D34_First/DE/DE_PC_vs_VCM_fdr0.05_log2fc0.5_wilcox.txt", quote = F, sep = "\t", row.names = T)
+
+# Single cell heatmap of feature expression
+PC_vs_VCM_DE_order <- arrange(PC_vs_VCM_DE, avg_log2FC)
+filtered.D34.samples.PCvsVCM <- subset(filtered.D34.samples, idents = c("PC", "VCM"))
+mat<- filtered.D34.samples.PCvsVCM[["SCT"]]@data[rownames(PC_vs_VCM_DE_order),] %>% as.matrix()
+
+## scale the rows
+mat<- t(scale(t(mat)))
+cluster_anno<- filtered.D34.samples.PCvsVCM@meta.data$CMCellType
+### Annotate certain genes.
+ha = rowAnnotation(foo = anno_mark(at = c(1:30, 394:423), labels = rownames(PC_vs_VCM_DE_order)[c(1:30, 394:423)]))
+#ha = rowAnnotation(foo = anno_mark(at = c(1, 4, 11, 31, 49, 131, 167, 181, 191, 217, 222), labels = c("NPPB", "NPPA", "MYL3", "MYL7", "MYL6", "TBX5", "TBX3", "MYH11", "FOS", "TBX18", "SHOX2")), bar = anno_barplot(PC_vs_VCM_DE_order$avg_log2FC))
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/DE/PC_vs_VCM.pdf", height = 10, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = gpar(fontsize = 4),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("PC" = "red", "VCM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c("#79AF97", "#C03728")))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(PC_vs_VCM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c("#004586", "#F7FAFF", "#FF420E")))
+draw(ht)
+dev.off()
+```
+
+
+Differential expression testing between ventricular cells and ACMs.
+```{r}
+# Create one column in the meta data storing the info for comparision.
+ACM_vs_VCM <- FindMarkers(filtered.D34.samples, ident.1 = "ACM", ident.2 = "VCM", min.ACMt = 0.25)
+ACM_vs_VCM_DE <- filter(ACM_vs_VCM, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+
+write.table(ACM_vs_VCM_DE,"/Data/iPSC_pacemaker/Seurat/D34_First/DE/DE_ACM_vs_VCM_fdr0.05_log2fc0.5_wilcox.txt", quote = F, sep = "\t", row.names = T)
+
+# Single cell heatmap of feature expression
+ACM_vs_VCM_DE_order <- arrange(ACM_vs_VCM_DE, avg_log2FC)
+filtered.D34.samples.ACMvsVCM <- subset(filtered.D34.samples, idents = c("ACM", "VCM"))
+mat<- filtered.D34.samples.ACMvsVCM[["SCT"]]@data[rownames(ACM_vs_VCM_DE_order),] %>% as.matrix()
+
+## scale the rows
+mat<- t(scale(t(mat)))
+cluster_anno<- filtered.D34.samples.ACMvsVCM@meta.data$CMCellType
+### Annotate certain genes.
+ha = rowAnnotation(foo = anno_mark(at = c(1:30, 378:407), labels = rownames(ACM_vs_VCM_DE_order)[c(1:30, 378:407)]))
+#ha = rowAnnotation(foo = anno_mark(at = c(1, 4, 11, 31, 49, 131, 167, 181, 191, 217, 222), labels = c("NPPB", "NPPA", "MYL3", "MYL7", "MYL6", "TBX5", "TBX3", "MYH11", "FOS", "TBX18", "SHOX2")), bar = anno_barplot(ACM_vs_VCM_DE_order$avg_log2FC))
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/DE/ACM_vs_VCM.pdf", height = 10, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = gpar(fontsize = 4),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("ACM" = "red", "VCM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c("#6A6599", "#C03728")))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(ACM_vs_VCM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c("#56B4E9", "#F7FAFF", "#E69F00")))
+draw(ht)
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+

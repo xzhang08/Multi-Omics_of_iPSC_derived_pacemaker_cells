@@ -1,0 +1,748 @@
+---
+title: "LDSC"
+output: html_document
+---
+
+Read reproducible peaks for each cluster of the scATAC-seq data.
+```{r}
+library(Repitools)
+library(stringr)
+for(cluster in paste0("X", 0:7)){
+  peaks <- readRDS(paste0("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/PeakCalls/", cluster, "-reproduciblePeaks.gr.rds"))
+  # convert GR object to dataframe 
+  df <- annoGR2DF(peaks)
+  print(dim(df))
+  df$chr <- str_replace(df$chr, "chr", "")
+  write.table(df, paste0("/Data/iPSC_pacemaker/scATAC/GWAS/ATAC_peaks/", cluster, "_peaks_no_header.bed"), quote = F, sep = "\t", row.names = F, col.names = F)
+}
+```
+
+
+Partitioned LD Scores Estimation for Pacemaker scATAC Peaks.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/ATAC_peaks/
+### Prepare the ATAC peaks in hg19 for each cluster
+for file in *.bed
+do
+awk '{print "chr"$1"\t"$2"\t"$3}' $file > /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Partitioned_LD_Scores/hg38_$file
+done
+
+# Convert to hg19.
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Partitioned_LD_Scores/
+for file in hg38_X*
+do
+CrossMap.py bed /Data/hg38tohg19/hg38ToHg19.over.chain /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Partitioned_LD_Scores/$file /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Partitioned_LD_Scores/hg19_$file
+sort -k1,1 -k2,2n hg19_$file > sort_hg19_$file
+done
+
+### Download 1000 genomes files.
+wget https://storage.googleapis.com/broad-alkesgroup-public/LDSCORE/1000G_Phase3_plinkfiles.tgz
+tar -xvzf 1000G_Phase3_plinkfiles.tgz
+
+### Download HapMap files.
+wget https://storage.googleapis.com/broad-alkesgroup-public/LDSCORE/hapmap3_snps.tgz
+tar -xvzf hapmap3_snps.tgz
+
+### Compute annot files
+for file in sort_hg19_hg38_X*
+do
+cluster=$(echo "$file" | awk -F_ '{print $4}')
+for k in $( seq 1 22 )
+do
+/Data/software/ldsc/make_annot.py --bed-file $file --bimfile ./1000G_EUR_Phase3_plink/1000G.EUR.QC.${k}.bim --annot-file ./output/$cluster.${k}.annot.gz
+done
+done
+
+### Computing LD scores with an annot file. Consider run these clusters in parallel as each cluster takes a long time to run.
+for cluster in X0 X1 X2 X3 X4 X5 X6 X7
+do
+for k in $( seq 1 22 )
+do
+/Data/software/ldsc/ldsc.py --l2 --bfile ./1000G_EUR_Phase3_plink/1000G.EUR.QC.${k} --ld-wind-cm 1 --annot ./output/$cluster.${k}.annot.gz --thin-annot --out ./output/$cluster.${k} --print-snps ./hapmap3_snps/hm.${k}.snp
+done
+done
+```
+
+
+Partitioned LD Scores Estimation for Human Enhancer Atlas.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Partitioned_LD_Scores
+
+# Download the list of 1,154,611 cCREs for all cell types (hg38) from Human Enhancer Atlas.
+wget http://renlab.sdsc.edu/kai/Key_Processed_Data/cCRE_hg38.tsv.gz
+gunzip cCRE_hg38.tsv.gz
+awk '{if(NR>1){print $1"\t"$2"\t"$3}}' cCRE_hg38.tsv > Format_cCRE_hg38.tsv
+
+# Convert to hg19.
+CrossMap.py bed /Data/hg38tohg19/hg38ToHg19.over.chain Format_cCRE_hg38.tsv cCRE_hg19.tsv
+sort -k1,1 -k2,2n cCRE_hg19.tsv > sort_cCRE_hg19.tsv
+
+### Compute annot files
+for k in $( seq 1 22 )
+do
+/Data/software/ldsc/make_annot.py --bed-file sort_cCRE_hg19.tsv --bimfile ./1000G_EUR_Phase3_plink/1000G.EUR.QC.${k}.bim --annot-file ./output/cCRE.${k}.annot.gz
+done
+
+### Computing LD scores with an annot file.
+for k in $( seq 1 22 )
+do
+/Data/software/ldsc/ldsc.py --l2 --bfile ./1000G_EUR_Phase3_plink/1000G.EUR.QC.${k} --ld-wind-cm 1 --annot ./output/cCRE.${k}.annot.gz --thin-annot --out ./output/cCRE.${k} --print-snps ./hapmap3_snps/hm.${k}.snp
+done
+```
+
+
+Cell type specific analyses preparation
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses
+### Download a list of HapMap3 SNPs as only these SNPs would be used as recommended.
+wget https://data.broadinstitute.org/alkesgroup/LDSCORE/w_hm3.snplist.bz2
+bunzip2 w_hm3.snplist.bz2
+```
+
+Cell type specific analyses for heart rate GWAS.
+```{bash}
+### Prepare the UKBB heart rate GWAS summary statistics.
+awk '{if(NR==1) {print "SNP CHR BP A1 A2 MAF HWEP INFO BETA SE P N"}; if(NR>1 && NR != 242){print $0" 458969"}}' /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/ZhuZ_30940143_ukbb.bolt_460K_selfRepWhite.rhrmean.assoc | cut -d" " -f 1-6,8,9,11,12 > UKBB_HeartRate_summary_statistics.txt
+# Line 242 was an additional header line, so removed in awk command.
+# convert this file to the .sumstats format
+/Data/software/ldsc/munge_sumstats.py --sumstats UKBB_HeartRate_summary_statistics.txt --merge-alleles w_hm3.snplist --out UKBB_HR
+
+#### Run the regressions
+#/Data/software/ldsc/ldsc.py --h2-cts UKBB_HR.sumstats.gz --ref-ld-chr ./1000G_EUR_Phase3_baseline/baseline. --out HR_C0 --ref-ld-chr-cts C0_ATAC.ldcts --w-ld-chr ./weights_hm3_no_hla/weights.
+
+/Data/software/ldsc/ldsc.py --h2-cts UKBB_HR.sumstats.gz --ref-ld-chr ./1000G_EUR_Phase3_baseline/baseline. --out HR_X0ToX7 --ref-ld-chr-cts X0ToX7_ATAC.ldcts --w-ld-chr ./weights_hm3_no_hla/weights.
+```
+
+Cell type specific analyses for Atrial Fibrillation GWAS. Only use the GWAS results of atrial fibrillation published in paper <<Biobank-driven genomic discovery yields new insight into atrial fibrillation biology>> from GWAS catalog (https://www.ebi.ac.uk/gwas/publications/30061737; GCST006414; FTP Download: harmonised/30061737-GCST006414-EFO_0000275-Build37.f.tsv.gz) as this study used European cohorts.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST006001-GCST007000/GCST006414/nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl.gz
+gunzip nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl.gz
+cut -f 2-10 nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl | awk '{if(NR==1) {print "SNP\tCHR\tPOS\tA1\tA2\tMAF\tBeta\tStdErr\tP\tN"}; if(NR>1){print $0"\t60620"}}' > Format_nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl
+
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl
+```
+
+Cell type specific analyses for height GWAS.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/Height
+
+# Download Height GWAS results of Predominantly European Ancestry (https://www.joelhirschhornlab.org/giant-consortium-results) as developers of LDSC do not recommend running ldsc on gwas with multiple ancestries.
+wget https://504394d8-624a-4827-9f25-95a83cd9675a.filesusr.com/archives/1d0101_394c2d3120ba4d0a9f6326ed56ff8854.gz?dn=GIANT_HEIGHT_YENGO_2022_GWAS_SUMMARY_STATS_EUR.gz
+
+cut -f 2- 1d0101_394c2d3120ba4d0a9f6326ed56ff8854.gz?dn=GIANT_HEIGHT_YENGO_2022_GWAS_SUMMARY_STATS_EUR | grep -v 'NA' | awk '{if($9>1 || $9 <0) {print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8"\t0\t"$10}; if($9>0 && $9 <1) {print $0}}' | awk '{if(NR==1){print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8"\tP\t"$10}; if(NR>1){print $0}}' > GWAS_Height_results.txt
+
+cut -f 9 GWAS_Height_results.txt | sort -k1,1n > tmp.txt
+
+awk '{if($1>1 || $1 <0) {print $0}}' tmp.txt > tmp_1.txt
+
+# convert this file to the .sumstats format
+/Data/software/ldsc/munge_sumstats.py --sumstats GWAS_Height_results.txt --merge-alleles ../w_hm3.snplist --out GWAS_Height
+
+#### Run the regressions
+/Data/software/ldsc/ldsc.py --h2-cts GWAS_Height.sumstats.gz --ref-ld-chr ../1000G_EUR_Phase3_baseline/baseline. --out Height_X0ToX7 --ref-ld-chr-cts ../X0ToX7_ATAC.ldcts --w-ld-chr ../weights_hm3_no_hla/weights.
+```
+
+
+Download more summary statistics from https://alkesgroup.broadinstitute.org/UKBB/.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/bp_DIASTOLICadjMEDz.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/bp_SYSTOLICadjMEDz.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/cov_EDU_YEARS.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/cov_SMOKING_STATUS.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_AID_SURE.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_ALLERGY_ECZEMA_DIAGNOSED.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_ASTHMA_DIAGNOSED.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_CARDIOVASCULAR.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_DERMATOLOGY.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_HI_CHOL_SELF_REP.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/disease_T2D.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/repro_MENARCHE_AGE.sumstats.gz
+wget https://storage.googleapis.com/broad-alkesgroup-public/UKBB/pigment_HAIR.sumstats.gz
+
+# convert the .sumstats format
+for file in *sumstats
+do
+/Data/software/ldsc/munge_sumstats.py --sumstats $file --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_$file
+done
+
+cp /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/test/UKBB_BMI.sumstats.gz /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/Convert_UKBB_BMI.sumstats.gz
+```
+
+Download more summary statistics from https://pgc.unc.edu/for-researchers/download-results/.
+```{bash}
+# <<Biological insights from 108 schizophrenia-associated genetic loci>> scz2014 Nature 25056061
+# Download to Mac first and then upload to AWS as wget for this file did not work.
+cut -f 1-6,8,9,10,11 daner_PGC_SCZ52_0513a.hq2 | awk '{if(NR==1){print "CHR\tSNP\tBP\tA1\tA2\tMAF\tINFO\tOR\tSE\tP\tN"}; if(NR>1){print $0"\t36989"}}' > Format_daner_PGC_SCZ52_0513a.hq2
+
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_daner_PGC_SCZ52_0513a.hq2 --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_daner_PGC_SCZ52_0513a.hq2
+
+# <<Genome-wide meta-analysis identifies new loci and functional pathways influencing Alzheimer’s disease risk>>  alz2019 Nature Genetics 30617256
+wget https://ctg.cncr.nl/documents/p1651/AD_sumstats_Jansenetal_2019sept.txt.gz
+gunzip AD_sumstats_Jansenetal_2019sept.txt.gz
+cut -f 2-6,8,9,13,14 AD_sumstats_Jansenetal_2019sept.txt | awk '{if(NR==1){print "CHR\tBP\tA1\tA2\tSNP\tP\tN\tBETA\tSE"}; if(NR>1){print $0}}' > Format_AD_sumstats_Jansenetal_2019sept.txt
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_AD_sumstats_Jansenetal_2019sept.txt --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_AD_sumstats_Jansenetal_2019sept.txt
+
+# <<Genome-wide association analyses identify 44 risk variants and refine the genetic architecture of major depression>>  mdd2018  Nature Genetics 29700475
+# Download to Mac first and then upload to AWS as wget for this file did not work.
+cut -f 1-6,8,9,10,11,17 MDD2018_ex23andMe | awk '{if(NR==1){print "CHR\tSNP\tBP\tA1\tA2\tMAF\tINFO\tOR\tSE\tP\tN"}; if(NR>1){print $0}}' > Format_MDD2018_ex23andMe
+
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_MDD2018_ex23andMe --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_MDD2018_ex23andMe
+```
+
+
+Download more summary statistics and do LD score regression.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+####################################################################################
+####################################################################################
+#Sick Sinus Syndrome: https://download.decode.is/form/2021/sicksinus2021_sumstats.gz
+gunzip sicksinus2021_sumstats.gz
+#### Covert from hg38 to hg19
+awk '{if(NR>1){print $1"\t"$2"\t"$2"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$10"\t"$11}}' sicksinus2021_sumstats > tmp_sicksinus2021_sumstats
+CrossMap.py bed /Data/hg38tohg19/hg38ToHg19.over.chain tmp_sicksinus2021_sumstats tmp_sicksinus2021_sumstats_hg19
+cut -f 1,2,4-11 tmp_sicksinus2021_sumstats_hg19 > tmp_2_sicksinus2021_sumstats_hg19
+awk '{print $0"\t1006656"}' tmp_2_sicksinus2021_sumstats_hg19 | sort -k1,1 -k2,2n > tmp_3_sicksinus2021_sumstats_hg19
+head -n 1 sicksinus2021_sumstats > header.txt
+cat header.txt tmp_3_sicksinus2021_sumstats_hg19 > sicksinus2021_sumstats_hg19
+/Data/software/ldsc/munge_sumstats.py --sumstats sicksinus2021_sumstats_hg19 --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_sicksinus2021_sumstats_hg19
+/Data/software/ldsc/ldsc.py --h2-cts Convert_sicksinus2021_sumstats_hg19.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Sick_Sinus_Syndrome --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+# Try changing the sample size to see if the p-value changes a lot.
+awk '{print $0"\t6469"}' tmp_2_sicksinus2021_sumstats_hg19 | sort -k1,1 -k2,2n > tmp_3_sicksinus2021_sumstats_hg19
+cat header.txt tmp_3_sicksinus2021_sumstats_hg19 > sicksinus2021_sumstats_hg19_case_size
+/Data/software/ldsc/munge_sumstats.py --sumstats sicksinus2021_sumstats_hg19_case_size --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_sicksinus2021_sumstats_hg19_case_size
+/Data/software/ldsc/ldsc.py --h2-cts Convert_sicksinus2021_sumstats_hg19_case_size.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Sick_Sinus_Syndrome_case_size --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+#### Turns out the p-value is not affected by the sample size.
+
+####################################################################################
+####################################################################################
+#Coronary Artery Disease: https://personal.broadinstitute.org/ryank/Aragam_2022_CARDIoGRAM_CAD_GWAS.zip
+unzip Aragam_2022_CARDIoGRAM_CAD_GWAS.zip
+gunzip GWAMA.CAD.INTERMEDIATE.SENSITIVITY.UKBB.PLUS.EXTRA.STUDIES.QCed.txt.gz
+# The coordinates are based on hg19, so no conversion is needed.
+cut -f 2,3,5,6,10,16,38,39,41,42 GWAMA.CAD.INTERMEDIATE.SENSITIVITY.UKBB.PLUS.EXTRA.STUDIES.QCed.txt > tmp1.txt
+head -n 1 tmp1.txt > header.txt
+awk '{if(NR>1){print $0}}' tmp1.txt > tmp2.txt
+cat header.txt tmp2.txt > Coronary_Artery_Disease
+/Data/software/ldsc/munge_sumstats.py --sumstats Coronary_Artery_Disease --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Coronary_Artery_Disease
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Coronary_Artery_Disease.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Coronary_Artery_Disease --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+#QT prolongation: https://personal.broadinstitute.org/ryank/Nauffal_2022_QT_GWAS_SAIGE.zip
+#<<Monogenic and Polygenic Contributions to QTc Prolongation in the Population>>
+unzip Nauffal_2022_QT_GWAS_SAIGE.zip
+ReadMe_ukb_qtc_gwas_summary_statistics.txt
+ukb_qtc_gwas_summary_statistics_final.txt
+# file has No SNP ID and N.
+perl /Data/software/hg19_Add_SNPID.pl /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/ukb_qtc_gwas_summary_statistics_final.txt /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/AddSNP_ukb_qtc_gwas_summary_statistics_final.txt
+
+cat header.txt AddSNP_ukb_qtc_gwas_summary_statistics_final.txt > tmp1.tsv
+awk '{if(NR==1){print $0"\tN"}; if(NR>1){print $0"\t84630"}}' tmp1.tsv > Format_AddSNP_ukb_qtc_gwas_summary_statistics_final.txt
+
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_AddSNP_ukb_qtc_gwas_summary_statistics_final.txt --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_AddSNP_ukb_qtc_gwas_summary_statistics_final
+
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_AddSNP_ukb_qtc_gwas_summary_statistics_final.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Convert_Format_AddSNP_ukb_qtc_gwas_summary_statistics_final.txt --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+Right Heart Structure-Function: https://personal.broadinstitute.org/ryank/Pirruccello_2022_UKBB_HeartStructures.zip
+#<<Genetic analysis of right heart structure and function in 40,000 people>>
+gunzip invnorm*tsv.gz
+cut -f 1,2,3,5,6,7,8,11,16 invnorm_lvef.tsv > tmp1.txt
+awk '{if(NR==1) {print "SNP\tCHR\tBP\tA1\tA2\tMAF\tINFO\tBETA\tP\tN"}; if(NR>1){print $0"\t40000"}}' tmp1.txt > Format_invnorm_lvef.tsv
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_invnorm_lvef.tsv --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_invnorm_lvef.tsv
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_invnorm_lvef.tsv.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Format_invnorm_lvef.tsv --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+for file in invnorm*tsv
+do
+cut -f 1,2,3,5,6,7,8,11,16 $file > tmp1.txt
+awk '{if(NR==1) {print "SNP\tCHR\tBP\tA1\tA2\tMAF\tINFO\tBETA\tP\tN"}; if(NR>1){print $0"\t40000"}}' tmp1.txt > Format_$file
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_$file --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_$file
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_$file\.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Format_$file --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+done
+
+# Sum up results
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select
+## Add file name to each row.
+for file in C0ToC4_Format_invnorm*tsv.cell_type_results.txt
+do
+awk '{print $0"\t"FILENAME}' $file > Tmp_$file
+done
+# Merge all files.
+cat Tmp* > Merge_Results.txt
+rm Tmp*
+
+####################################################################################
+####################################################################################
+ECG traits: https://personal.broadinstitute.org/ryank/Choi2021_TOPMed_freeze6.zip
+unzip Choi2021_TOPMed_freeze6.zip
+TOPMed_freeze6_README.txt
+gunzip TOPMed_freeze6_common_singlevariant*.tsv.gz
+# These files do not have RS ID for variants, so obtain the RSIDs first based on the coordinates (hg38)
+
+# Download hg19 and hg38snps and convert to Bed file format using bigBedToBed.
+cd /Data/software
+wget https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/bigBedToBed
+chmod +x bigBedToBed
+wget http://hgdownload.soe.ucsc.edu/gbdb/hg19/snp/dbSnp155Common.bb
+./bigBedToBed dbSnp155Common.bb hg19_dbSnp155Common.bed
+rm dbSnp155Common.bb
+wget https://hgdownload.soe.ucsc.edu/gbdb/hg38/snp/dbSnp155Common.bb
+./bigBedToBed dbSnp155Common.bb hg38_dbSnp155Common.bed
+rm dbSnp155Common.bb
+
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+for file in $(ls TOPMed_freeze6_common_singlevariant*)
+do
+perl /Data/software/Add_SNPID.pl /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/$file /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/AddSNP_$file
+done
+
+for file in AddSNP_TOPMed_freeze6_common_singlevariant*
+do
+cut -f 1,2,4,6,7,8,9,12 $file > tmp1.tsv
+cat header.txt tmp1.tsv > tmp2.tsv
+awk '{if(NR==1){print $0"\tN"}; if(NR>1){print $0"\t29000"}}' tmp2.tsv > Format_$file
+done
+
+for file in Format_AddSNP_TOPMed_freeze6_common_singlevariant*
+do
+/Data/software/ldsc/munge_sumstats.py --sumstats $file --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_$file
+done
+
+for file in Convert_Format_AddSNP_TOPMed_freeze6_common_singlevariant*.sumstats.gz
+do
+/Data/software/ldsc/ldsc.py --h2-cts $file --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_$file --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+done
+```
+
+Download <<Genetic study links components of the autonomous nervous system to heart-rate profile during exercise>> summary statistics from GWAS catalog.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+# Summary statistics for Heart rate increase in response to exercise
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005845/harmonised/29497042-GCST005845-EFO_0009184-Build37.f.tsv.gz
+
+# Heart rate response to recovery post exercise (30 sec)
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005850/harmonised/29497042-GCST005850-EFO_0009185-build37.f.tsv.gz
+
+# Heart rate response to recovery post exercise (40 sec)
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005849/harmonised/29497042-GCST005849-EFO_0009185-build37.f.tsv.gz
+
+# Heart rate response to recovery post exercise (50 sec)
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005848/harmonised/29497042-GCST005848-EFO_0009185-build37.f.tsv.gz
+
+# Heart rate response to recovery post exercise (20 sec)
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005847/harmonised/29497042-GCST005847-EFO_0009185-build37.f.tsv.gz
+
+# Heart rate response to recovery post exercise (10 sec)
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST005001-GCST006000/GCST005846/harmonised/29497042-GCST005846-EFO_0009185-build37.f.tsv.gz
+
+gunzip 29*gz
+
+### Prepare the UKBB heart rate GWAS summary statistics.
+for file in 29*
+do
+awk '{if(NR==1) {print "SNP\tCHR\tBP\tA1\tA2\tMAF\tINFO\tBETA\tSE\tP\tN"}; if(NR>1){print $11"\t"$2"\t"$3"\t"$4"\t"$5"\t"$10"\t"$12"\t"$6"\t"$7"\t"$8"\t"$9}}' $file  > Format_$file
+done
+
+### Convert this file to the .sumstats format
+for file in Format_29*
+do
+/Data/software/ldsc/munge_sumstats.py --sumstats $file --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_$file
+done
+
+#### Run the regressions (use one file as an example)
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_29497042-GCST005850-EFO_0009185-build37.f.tsv.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/X0ToC7_Convert_Format_29497042-GCST005850-EFO_0009185-build37.f.tsv.sumstats.gz --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/X0ToX7_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+```
+
+
+
+```{bash}
+####################################################################################
+####################################################################################
+P wave duration: https://personal.broadinstitute.org/ryank/Weng2020_pwave_duration_mixed.zip
+Not a genome-wide study? Only has 25997 SNPs.
+
+####################################################################################
+####################################################################################
+PR interval: https://personal.broadinstitute.org/ryank/PR_1000g_GWAS_ALL.zip
+#<<Multi-ancestry GWAS of the electrocardiographic PR interval identifies 202 loci underlying cardiac conduction>>
+awk '{if(NR==1){print "SNP\tA1\tA2\tMAF\tchr\tpos\tEffect\tStdErr\tP.value\tN"}; if(NR>1){print $0"\t293051"}}' PR_1000g_GWAS_ALL.txt > Format_PR_1000g_GWAS_ALL.txt
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_PR_1000g_GWAS_ALL.txt --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_PR_1000g_GWAS_ALL
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_PR_1000g_GWAS_ALL.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_PR_1000g_GWAS_ALL --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+Heart Failure: https://personal.broadinstitute.org/ryank/HERMES_Jan2019_HeartFailure_summary_data.txt.zip
+unzip HERMES_Jan2019_HeartFailure_summary_data.txt.zip
+/Data/software/ldsc/munge_sumstats.py --sumstats humgen/diabetes2/users/mvg/portal/MI/ftp/HERMES_Jan2019_HeartFailure_summary_data.txt --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_HeartFailure
+/Data/software/ldsc/ldsc.py --h2-cts Convert_HeartFailure.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_HeartFailure --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+LVEF: https://personal.broadinstitute.org/ryank/MRI_lvef_filtered.zip
+unzip MRI_lvef_filtered.zip
+cut -f 1,2,3,5,6,7,8,11,16,17 MRI_lvef_filtered.tsv > tmp1.txt
+awk '{if(NR==1) {print "SNP\tCHR\tBP\tA1\tA2\tMAF\tINFO\tBETA\tP\tN"}; if(NR>1){print $0}}' tmp1.txt > Format_MRI_lvef_filtered.tsv
+
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_MRI_lvef_filtered.tsv --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_LVEF
+/Data/software/ldsc/ldsc.py --h2-cts Convert_LVEF.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_LVEF --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+####################################################################################
+####################################################################################
+IBD: https://www.dropbox.com/s/ttuc6s7tv26voq3/iibdgc-trans-ancestry-filtered-summary-stats.tgz?dl=0
+# Disconnect VPN to download file iibdgc-trans-ancestry-filtered-summary-stats.tgz to local and upload to AWS.
+tar zxvf iibdgc-trans-ancestry-filtered-summary-stats.tgz
+EUR.IBD.gwas_info03_filtered.assoc
+EUR.CD.gwas_info03_filtered.assoc
+EUR.UC.gwas_info03_filtered.assoc
+README
+CD_trans_ethnic_association_summ_stats_b37.txt.gz
+UC_trans_ethnic_association_summ_stats_b37.txt.gz
+IBD_trans_ethnic_association_summ_stats_b37.txt.gz
+
+awk '{if(NR==1){print $0"\tN"}; if(NR>1){print $0"\t86640"}}' EUR.IBD.gwas_info03_filtered.assoc > Format_UR.IBD.gwas_info03_filtered.assoc
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_UR.IBD.gwas_info03_filtered.assoc --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_UR.IBD.gwas_info03_filtered.assoc
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_UR.IBD.gwas_info03_filtered.assoc.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Convert_Format_UR.IBD.gwas_info03_filtered.assoc.txt --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+
+awk '{if(NR==1){print $0"\tN"}; if(NR>1){print $0"\t86640"}}' EUR.CD.gwas_info03_filtered.assoc > Format_EUR.CD.gwas_info03_filtered.assoc
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_EUR.CD.gwas_info03_filtered.assoc --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_EUR.CD.gwas_info03_filtered.assoc
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_EUR.CD.gwas_info03_filtered.assoc.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Convert_Format_EUR.CD.gwas_info03_filtered.assoc.txt --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+
+awk '{if(NR==1){print $0"\tN"}; if(NR>1){print $0"\t86640"}}' EUR.UC.gwas_info03_filtered.assoc > Format_UR.UC.gwas_info03_filtered.assoc
+/Data/software/ldsc/munge_sumstats.py --sumstats Format_UR.UC.gwas_info03_filtered.assoc --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_Format_UR.UC.gwas_info03_filtered.assoc
+/Data/software/ldsc/ldsc.py --h2-cts Convert_Format_UR.UC.gwas_info03_filtered.assoc.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_Convert_Format_UR.UC.gwas_info03_filtered.assoc.txt --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+
+####################################################################################
+####################################################################################
+Total Cholesterol: http://csg.sph.umich.edu/abecasis/public/lipids2013/jointGwasMc_TC.txt.gz
+gunzip jointGwasMc_TC.txt.gz
+/Data/software/ldsc/munge_sumstats.py --sumstats jointGwasMc_TC.txt --merge-alleles /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/w_hm3.snplist --out Convert_TotalCholesterol
+/Data/software/ldsc/ldsc.py --h2-cts Convert_TotalCholesterol.sumstats.gz --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/C0ToC4_TotalCholesterol --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/C0ToC4_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+```
+
+Useful info for determining sample size.
+https://github.com/bulik/ldsc/issues/95
+https://groups.google.com/g/ldsc_users/c/yJT-_qSh_44/m/MmKKJYsBAwAJ
+https://groups.google.com/g/ldsc_users/c/8iwBiuVO2Ow
+
+#### Run the regressions
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select
+for file in Convert*gz
+do
+/Data/software/ldsc/ldsc.py --h2-cts $file --ref-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/1000G_EUR_Phase3_baseline/baseline. --out /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/X0ToX7_$file --ref-ld-chr-cts /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/X0ToX7_ATAC.ldcts --w-ld-chr /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/weights_hm3_no_hla/weights.
+done
+```
+
+Sum up the results.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select
+
+# Copy results for heart rate and height to this folder as well.
+cp /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/HR_X0ToX7.cell_type_results.txt /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select
+mv HR_X0ToX7.cell_type_results.txt X0ToX7_HR.cell_type_results.txt
+cp /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/Height/Height_X0ToX7.cell_type_results.txt /Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select 
+mv Height_X0ToX7.cell_type_results.txt  X0ToX7_Height.cell_type_results.txt
+## Add file name to each row.
+for file in X0ToX7*type_results.txt
+do
+awk '{print $0"\t"FILENAME}' $file > Tmp_$file
+done
+
+# Merge all files.
+cat Tmp* > Merge_Results.txt
+rm Tmp*
+```
+
+```{r}
+library(dplyr)
+ldsc_res <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/GWAS_Select/Merge_Results.txt", header = T)
+ldsc_res <- filter(ldsc_res, Name != "Name")
+
+names(ldsc_res)[5] <- "File" 
+
+file2pheno <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/File2Phenotype.txt", sep = "\t", header = T)
+
+ldsc_res_pheno <- left_join(ldsc_res, file2pheno, by = "File")
+
+manuscript_pheno <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/Manuscript_File_Phenotype.txt", sep = "\t", header = T)
+
+ldsc_res_pheno <- filter(ldsc_res_pheno, File %in% manuscript_pheno$File)
+
+ldsc_res_pheno_manu <- left_join(ldsc_res_pheno, manuscript_pheno, by = "File")
+
+ldsc_res_pheno_manu <- select(ldsc_res_pheno_manu, Name, Coefficient_P_value, Manuscript)
+
+ldsc_res_pheno_manu$FDR <- p.adjust(ldsc_res_pheno_manu$Coefficient_P_value)
+
+ldsc_res_pheno_manu$Significance = ifelse(ldsc_res_pheno_manu$FDR < 0.1, "Yes", "No")
+
+data <- ldsc_res_pheno_manu
+data <- select(data, Manuscript, Name, FDR, Significance, Coefficient_P_value)
+names(data) <- c("Phenotype", "Cells", "FDR", "Significance", "Coefficient_P_value")
+
+write.table(data, "/Data/iPSC_pacemaker/scATAC/GWAS/LDSC/Cell_type_specific_analyses/Manuscript_LDSC_results.txt", quote = F, sep = "\t", row.names = F)
+
+### Try to remove Cluster 5 and 6 to see if heart rate is significant.
+ldsc_res_pheno_manu_filter <- filter(ldsc_res_pheno_manu, Name != "X5" & Name != "X6")
+ldsc_res_pheno_manu_filter$FDR <- p.adjust(ldsc_res_pheno_manu_filter$Coefficient_P_value)
+
+ldsc_res_pheno_manu_filter <- arrange(ldsc_res_pheno_manu_filter, FDR)
+ldsc_res_pheno_manu_filter[grep("Rate", ldsc_res_pheno_manu_filter$Manuscript),]
+### Answer is not really.
+#    Name    Coefficient_P_value Manuscript        FDR
+#35    X3 0.00045935179699454153 Heart Rate 0.09187036
+#36    X4  0.0005203178347443473 Heart Rate 0.10354325
+#39    X0  0.0006720944165466812 Heart Rate 0.13173051
+#44    X1  0.0009350813789454342 Heart Rate 0.17953562
+#50    X2   0.001296031333598916 Heart Rate 0.23976580
+#234   X7    0.04131921054035918 Heart Rate 1.00000000
+``` 
+
+
+Plot figure.
+```{r}
+library(tidyverse)
+library(ggdendro)
+library(cowplot)
+library(patchwork)
+library(ggtree)
+library(aplot)
+
+data <- read.table("/Users/xzhang08/Desktop/Figure_6/Manuscript_LDSC_results.txt", header = T, sep = "\t")
+#data$Cells = as.character(data$Cells)
+# make data square to calculate euclidean distance
+mat_real <- data %>% 
+  select(-Coefficient_P_value, -Significance) %>%  # drop unused columns to faciliate widening
+  pivot_wider(names_from = Cells, values_from = FDR) %>% 
+  data.frame() # make df as tibbles -> matrix annoying
+
+row.names(mat_real) <- mat_real$Phenotype  # put gene in `row`
+mat_real <- mat_real[,-1] #drop gene column as now in rows
+clust <- hclust(dist(mat_real %>% as.matrix())) # hclust with distance matrix
+
+ddgram <- as.dendrogram(clust) # create dendrogram
+ggtree_plot <- ggtree::ggtree(ddgram)
+ggtree_plot
+
+v_clust <- hclust(dist(mat_real %>% as.matrix() %>% t()))
+ddgram_col <- as.dendrogram(v_clust)
+ggtree_plot_col <- ggtree(ddgram_col) + layout_dendrogram()
+
+dotplot <- data %>%
+  mutate(Phenotype = factor(Phenotype, levels = clust$labels[clust$order]), Cells = factor(Cells, levels = v_clust$labels[v_clust$order])) %>% 
+  ggplot(aes(x= Cells, y = Phenotype, color = Significance, size = -log10(FDR))) + geom_point() + scale_y_discrete(position = "right") + cowplot::theme_cowplot() + 
+  theme(axis.line  = element_blank()) + xlab("Cell Types") + ylab("Traits") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 15), axis.text.x =  element_text(color = "black")) + scale_color_manual(values=c('#5F559B', '#BB0021')) + theme(axis.ticks = element_blank())  
+
+dotplot %>% 
+  insert_left(ggtree_plot, width=.1) %>%
+  insert_top(ggtree_plot_col, height=.02)
+ggsave("/Users/xzhang08/Desktop/LDSC_results.pdf", width = 7, height = 8)
+```
+
+
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/ATAC_peaks
+
+X0_peaks_no_header.bed
+
+cd /Data/iPSC_pacemaker/scATAC/GWAS/Previous/ATAC_peaks
+
+cut -f 1-3 /Data/iPSC_pacemaker/scATAC/GWAS/Previous/ATAC_peaks/C0_peaks_no_header.bed > C0_peaks_no_header.bed
+
+cut -f 1-3 /Data/iPSC_pacemaker/scATAC/GWAS/ATAC_peaks/X2_peaks_no_header.bed > X2_peaks_no_header.bed
+
+cat C0_peaks_no_header.bed X2_peaks_no_header.bed | sort -k1,1n -k2,2n | uniq > C0_X2.bed
+```
+
+
+```{bash}
+/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_Select/tmp
+
+awk '{if($5>0){print $0}}' Convert_UKBB_BMI.sumstats > Tmp_Convert_UKBB_BMI.sumstats
+
+awk '{if($5>0){print $0}}' UKBB_HR.sumstats > Tmp_UKBB_HR.sumstats
+
+awk '{if($5>0){print $0}}' Convert_nielsen-thorolfsdottir-willer-NG2018-AFib-gwas-summary-statistics.tbl.sumstats | wc -l
+
+
+awk '{if($5>0){print $0}}' Convert_Format_UR.IBD.gwas_info03_filtered.assoc.sumstats | wc -l
+```
+
+
+Plot figure.
+```{r}
+library(tidyverse)
+library(ggdendro)
+library(cowplot)
+library(patchwork)
+library(ggtree)
+library(aplot)
+
+data <- read.table("/Users/xzhang08/Desktop/LDSC_results.txt", header = T, sep = "\t")
+#data$Cells = as.character(data$Cells)
+# make data square to calculate euclidean distance
+mat_real <- data %>% 
+  select(-Coefficient_P_value, -Significance) %>%  # drop unused columns to faciliate widening
+  pivot_wider(names_from = Cells, values_from = FDR) %>% 
+  data.frame() # make df as tibbles -> matrix annoying
+
+row.names(mat_real) <- mat_real$Phenotype  # put gene in `row`
+mat_real <- mat_real[,-1] #drop gene column as now in rows
+clust <- hclust(dist(mat_real %>% as.matrix())) # hclust with distance matrix
+
+ddgram <- as.dendrogram(clust) # create dendrogram
+ggtree_plot <- ggtree::ggtree(ddgram)
+ggtree_plot
+
+v_clust <- hclust(dist(mat_real %>% as.matrix() %>% t()))
+ddgram_col <- as.dendrogram(v_clust)
+ggtree_plot_col <- ggtree(ddgram_col) + layout_dendrogram()
+
+dotplot <- data %>%
+  mutate(Phenotype = factor(Phenotype, levels = clust$labels[clust$order]), Cells = factor(Cells, levels = v_clust$labels[v_clust$order])) %>% 
+  ggplot(aes(x= Cells, y = Phenotype, color = Significance, size = -log10(FDR))) + geom_point() + scale_y_discrete(position = "right") + cowplot::theme_cowplot() + 
+  theme(axis.line  = element_blank()) + xlab("Cell Types") + ylab("Traits") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 15), axis.text.x =  element_text(color = "black")) + scale_color_manual(values=c('#5F559B', '#BB0021')) + theme(axis.ticks = element_blank())  
+
+dotplot %>% 
+  insert_left(ggtree_plot, width=.1) %>%
+  insert_top(ggtree_plot_col, height=.02)
+ggsave("/Users/xzhang08/Desktop/LDSC_results.pdf", width = 12, height = 8)
+```
+
+
+
+Plot figure.
+```{r}
+library(tidyverse)
+library(ggdendro)
+library(cowplot)
+library(patchwork)
+library(ggtree)
+library(aplot)
+
+data <- read.table("/Users/xzhang08/Desktop/Pacemaker_Manuscript/Figure_6/LDSC_results_3.txt", header = T, sep = "\t")
+#data$Cells = as.character(data$Cells)
+# make data square to calculate euclidean distance
+mat_real <- data %>% 
+  select(-Coefficient_P_value, -Significance) %>%  # drop unused columns to faciliate widening
+  pivot_wider(names_from = Cells, values_from = FDR) %>% 
+  data.frame() # make df as tibbles -> matrix annoying
+
+row.names(mat_real) <- mat_real$Phenotype  # put gene in `row`
+mat_real <- mat_real[,-1] #drop gene column as now in rows
+clust <- hclust(dist(mat_real %>% as.matrix())) # hclust with distance matrix
+
+ddgram <- as.dendrogram(clust) # create dendrogram
+ggtree_plot <- ggtree::ggtree(ddgram)
+ggtree_plot
+
+v_clust <- hclust(dist(mat_real %>% as.matrix() %>% t()))
+ddgram_col <- as.dendrogram(v_clust)
+ggtree_plot_col <- ggtree(ddgram_col) + layout_dendrogram()
+
+dotplot <- data %>%
+  mutate(Phenotype = factor(Phenotype, levels = clust$labels[clust$order]), Cells = factor(Cells, levels = v_clust$labels[v_clust$order])) %>% 
+  ggplot(aes(x= Cells, y = Phenotype, color = Significance, size = -log10(FDR))) + geom_point() + scale_y_discrete(position = "right") + cowplot::theme_cowplot() + 
+  theme(axis.line  = element_blank()) + xlab("Cell Types") + ylab("Traits") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 15), axis.text.x =  element_text(color = "black")) + scale_color_manual(values=c('#5F559B', '#BB0021')) + theme(axis.ticks = element_blank())  
+
+dotplot %>% 
+  insert_left(ggtree_plot, width=.1) %>%
+  insert_top(ggtree_plot_col, height=.02)
+ggsave("/Users/xzhang08/Desktop/Pacemaker_Manuscript/Figure_6/LDSC_results_3.pdf", width = 12, height = 8)
+```
+
+
+Plot figure.
+```{r}
+library(tidyverse)
+library(ggdendro)
+library(cowplot)
+library(patchwork)
+library(ggtree)
+library(aplot)
+library(paletteer)
+
+data <- read.table("/Users/xzhang08/Desktop/Pacemaker_Manuscript/Figure_6/Final_LDSC_results.txt", header = T, sep = "\t")
+#data$Cells = as.character(data$Cells)
+# make data square to calculate euclidean distance
+mat_real <- data %>% 
+  select(-Coefficient_P_value, -Significance) %>%  # drop unused columns to faciliate widening
+  pivot_wider(names_from = Cells, values_from = FDR) %>% 
+  data.frame() # make df as tibbles -> matrix annoying
+
+row.names(mat_real) <- mat_real$Phenotype  # put gene in `row`
+mat_real <- mat_real[,-1] #drop gene column as now in rows
+clust <- hclust(dist(mat_real %>% as.matrix())) # hclust with distance matrix
+
+ddgram <- as.dendrogram(clust) # create dendrogram
+ggtree_plot <- ggtree::ggtree(ddgram)
+ggtree_plot
+
+v_clust <- hclust(dist(mat_real %>% as.matrix() %>% t()))
+ddgram_col <- as.dendrogram(v_clust)
+ggtree_plot_col <- ggtree(ddgram_col) + layout_dendrogram()
+
+dotplot <- data %>%
+  mutate(Phenotype = factor(Phenotype, levels = clust$labels[clust$order]), Cells = factor(Cells, levels = v_clust$labels[v_clust$order])) %>% 
+  ggplot(aes(x= Cells, y = Phenotype, color = Significance, size = -log10(FDR))) + geom_point() + scale_y_discrete(position = "right") + cowplot::theme_cowplot() + 
+  theme(axis.line  = element_blank()) + xlab("Cell Types") + ylab("Traits") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 15), axis.text.x =  element_text(color = "black")) + scale_color_manual(values=c('#4E79A7','#BDBDBD','#E15759')) + theme(axis.ticks = element_blank())  
+
+dotplot %>% 
+  insert_left(ggtree_plot, width=.1) %>%
+  insert_top(ggtree_plot_col, height=.02)
+ggsave("/Users/xzhang08/Desktop/Pacemaker_Manuscript/Figure_6/Final_LDSC_results.pdf", width = 12, height = 8)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1019 @@
+---
+title: "D34.Pacemaker.Cells"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(RColorBrewer)
+library(scDblFinder)
+library(SummarizedExperiment)
+library(stringr)
+library(tidyr)
+library(ggforce)
+library(cluster)
+library(rBCS)
+library(reshape2)
+library(ggpubr)
+```
+
+
+```{r}
+# Define colors
+custom_colors <- list()
+colors_dutch <- c(
+  '#FFC312','#C4E538','#12CBC4','#FDA7DF','#ED4C67',
+  '#F79F1F','#A3CB38','#1289A7','#D980FA','#B53471',
+  '#EE5A24','#009432','#0652DD','#9980FA','#833471',
+  '#EA2027','#006266','#1B1464','#5758BB','#6F1E51'
+)
+
+colors_spanish <- c(
+  '#40407a','#706fd3','#f7f1e3','#34ace0','#33d9b2',
+  '#2c2c54','#474787','#aaa69d','#227093','#218c74',
+  '#ff5252','#ff793f','#d1ccc0','#ffb142','#ffda79',
+  '#b33939','#cd6133','#84817a','#cc8e35','#ccae62'
+)
+
+custom_colors$discrete <- c(colors_dutch, colors_spanish)
+```
+
+
+```{r}
+load("/Data/iPSC_pacemaker/Seurat/D34_First/D34.filtered.samples.RData")
+ventricular.cells <- subset(filtered.samples, subset = orig.ident == "D34_r0_V" | orig.ident == "D34_r1_V" | orig.ident == "D34_r2_V")
+ventricular.cells
+#An object of class Seurat 
+#27519 features across 20712 samples within 1 assay 
+#Active assay: RNA (27519 features, 0 variable features)
+```
+
+```{r}
+# Normalize the counts
+seurat_phase <- NormalizeData(ventricular.cells)
+```
+
+Evaluating effects of cell cycle.
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Manually change the names of these cell cycle genes.
+s.genes[s.genes=="MLF1IP"] = "CENPU"
+g2m.genes[g2m.genes=="FAM64A"] = "PIMREG"
+g2m.genes[g2m.genes=="HN1"] = "JPT1"
+
+# Redo score cells for cell cycle
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.genes, 
+                                 s.features = s.genes)
+# Calculate the percentage of cells in different phases.
+phase_count <- table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase)
+phase_per <- prop.table(table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase), 1)*100
+write.table(phase_count, "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/CellCyclePhaseCount.txt", quote = F, sep = "\t")
+write.table(phase_per, "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/CellCyclePhasePercentage.txt", quote = F, sep = "\t")
+
+# Visualize the distribution of cell cycle markers across
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "Phase", ncol = 2) & scale_fill_manual(values = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/Cell.cycle.markers.by.phase.pdf")
+
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "orig.ident", ncol = 2) & scale_y_discrete(limits = rev(c("D34_r0_V", "D34_r1_V", "D34_r2_V"))) & scale_fill_manual(values = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/Cell.cycle.markers.by.sample.pdf")
+```
+
+```{r}
+# Identify the most variable genes
+seurat_phase <- FindVariableFeatures(seurat_phase, 
+                     selection.method = "vst",
+                     nfeatures = 4000, 
+                     verbose = FALSE)
+		     
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+
+# Perform PCA
+seurat_phase <- RunPCA(seurat_phase, ndims.print = 1:40, nfeatures.print = 10)
+
+# Run UMAP
+seurat_phase <- RunUMAP(seurat_phase, dims = 1:40)
+
+# Plot the UMAP colored by cell cycle phase
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/SplitCellCyclePlot.pdf", width = 10, height = 5)
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/MergedCellCyclePlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        group.by= "orig.ident") + scale_color_discrete(limits = c("D34_r0_V", "D34_r1_V", "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/MergedCellCyclePlot_Samples.pdf")
+
+#DimHeatmap(seurat_phase, dims = c(8, 10))
+```
+We do see large differences due to cell cycle. Based on this plot, we would regress out the variation due to cell cycle.
+
+Evaluating effects of mitochodrial expression.
+```{r}
+# Check quartile values
+summary(seurat_phase@meta.data$percent.mt)
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.000   8.002  11.579  13.278  16.507  49.961 
+# Turn mitoRatio into categorical factor vector based on quartile values
+seurat_phase@meta.data$mitoFr <- cut(seurat_phase@meta.data$percent.mt, 
+                   breaks=c(-Inf, 8.002, 11.579, 16.507, Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+
+# Plot the PCA colored by mitoFr
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr",
+        split.by = "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/SplitMitoFrPlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Covariates/MergedMitoFrPlot.pdf")
+```
+We do not see large differences due to mitochondrial percentage for the same Tissue. Based on this plot, we would not regress out the variation due to mitochondrial percentage.
+
+Add cell cycle score to ventricular.cells for SCTransform.
+```{r}
+table(rownames(seurat_phase@meta.data)==rownames(ventricular.cells@meta.data))
+ventricular.cells@meta.data <- mutate(ventricular.cells@meta.data, S.Score = seurat_phase@meta.data$S.Score, G2M.Score = seurat_phase@meta.data$G2M.Score, Phase = seurat_phase@meta.data$Phase)
+```
+
+Apply sctransform normalization while regress out cell cycle scoring.
+```{r}
+# SCTranform
+## Adjust the limit for allowable object sizes within R (Default is 500 * 1024 ^ 2 = 500 Mb) using the following code:
+#options(future.globals.maxSize = 10000 * 1024^2)
+ventricular.cells <- SCTransform(ventricular.cells, method = "glmGamPoi", vars.to.regress = c("G2M.Score", "S.Score"), variable.features.n = 5000)
+
+# Save the seurat object
+#saveRDS(ventricular.cells, "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/SCTransform.ventricular.cells.rds")
+
+#filtered.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/SCTransform.filtered.samples.rds")
+```
+
+
+```{r}
+ventricular.cells <- RunPCA(ventricular.cells)
+DimPlot(ventricular.cells, reduction = "pca", group.by = "orig.ident", cols = custom_colors$discrete) + scale_color_discrete(limits = c("D34_r0_V", "D34_r1_V", "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/MergedPCAPlot.pdf")
+
+ventricular.cells$orig.ident <- factor(ventricular.cells$orig.ident, levels = unique(ventricular.cells$orig.ident))
+
+DimPlot(ventricular.cells, reduction = "pca", split.by = "orig.ident", group.by = "orig.ident", cols = custom_colors$discrete) + scale_color_discrete(limits = c("D34_r0_V", "D34_r1_V", "D34_r2_V"))
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/SplitPCAPlot.pdf", width = 30, height = 5)
+```
+
+Determining how many PCs to include in the clustering step to ensure that we are capturing the majority of the variation, or cell types, present in our dataset.
+```{r}
+# Explore heatmap of PCs
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/HeatmapOfPCs_1_12.pdf", width = 25, height = 15)
+#DimHeatmap(ventricular.cells, dims = 1:25, cells = 500, balanced = TRUE, fast = FALSE)
+DimHeatmap(ventricular.cells, dims = 1:12, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/HeatmapOfPCs_13_24.pdf", width = 25, height = 15)
+DimHeatmap(ventricular.cells, dims = 13:24, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/HeatmapOfPCs_25_36.pdf", width = 25, height = 15)
+DimHeatmap(ventricular.cells, dims = 25:36, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/HeatmapOfPCs_37_48.pdf", width = 25, height = 15)
+DimHeatmap(ventricular.cells, dims = 37:48, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/HeatmapOfPCs_49_50.pdf", width = 25, height = 15)
+DimHeatmap(ventricular.cells, dims = 49:50, cells = 500, balanced = TRUE)
+dev.off()
+
+# Plot the elbow plot
+ElbowPlot(object = ventricular.cells, ndims = 50)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/PCs/ElbowPlot.pdf")
+```
+Decision: Use the first 40 PCs to generate the clusters.
+
+Cluster the cells
+```{r}
+# Determine the K-nearest neighbor graph
+ventricular.cells <- FindNeighbors(object = ventricular.cells, 
+                                dims = 1:40)
+                                
+# Determine the clusters for various resolutions                                
+ventricular.cells <- FindClusters(object = ventricular.cells,
+                               resolution = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(ventricular.cells), 5)
+
+#ventricular.cells@meta.data <- select(ventricular.cells@meta.data, c(1,25,2:10,26:34,11:24))
+
+
+# Count the number of clusters at different resolutions.
+Ncluster <- c()
+for(res in c(12:33)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(ventricular.cells@meta.data[,res]))))
+#unique(ventricular.cells@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+```
+
+Run non-linear dimensional reduction (UMAP/tSNE)
+```{r}
+ventricular.cells <- RunUMAP(ventricular.cells, dims = 1:40)
+
+# Plot the UMAP
+# Assign identity of clusters
+Idents(object = ventricular.cells) <- "SCT_snn_res.0.6"
+DimPlot(ventricular.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/UMAP.res.0.6.pdf", width = 10, height = 8)
+```
+
+
+Segregation of clusters by sample
+```{r}
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(ventricular.cells, 
+                     vars = c("ident", "orig.ident")) %>%
+        dplyr::count(ident, orig.ident) %>%
+        tidyr::spread(ident, n)
+
+write.table(n_cells,"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/N_Cells_For_Each_Clusters.txt", quote = F, sep = "\t", row.names = F)
+
+# UMAP of cells in each cluster by sample
+DimPlot(ventricular.cells, 
+        label = TRUE, 
+        split.by = "orig.ident")  + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/SplitSamples.UMAP.res.0.6.pdf", width = 15, height = 5)
+
+DimPlot(ventricular.cells, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        #cols = DiscretePalette(12, palette = "stepped")[c(1,5,9,3,7,11,4,8,12)],
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/MergedSamples.UMAP.res.0.6.pdf", width = 10, height = 8)
+
+DimPlot(ventricular.cells, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        cols = custom_colors$discrete,
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/MergedSamples.UMAP.res.0.6.diff.colors.pdf", width = 10, height = 8)
+
+```
+Using the top 5000 variable genes among D34 pacemaker cells shows batch effect. This is inconsistent with the analysis using all the D34 cells including pacemaker, atrial and ventricular cells, which also used top 5000 variable genes. However, these two set of 5000 variable genes are different. The reason is that the genes leading to batch effect in D34 pacemaker cell clustering is not included in the D34 all cell type clustering as difference among cell types dominate the difference between batches in D34 pacemaker cells.
+
+
+Test to use top 3000 genes
+```{r}
+ventricular.cells.3000 <- SCTransform(ventricular.cells, method = "glmGamPoi", vars.to.regress = c("G2M.Score", "S.Score"), variable.features.n = 3000)
+
+ventricular.cells.3000 <- RunPCA(ventricular.cells.3000)
+
+# Determine the K-nearest neighbor graph
+ventricular.cells.3000 <- FindNeighbors(object = ventricular.cells.3000, 
+                                dims = 1:40)
+                                
+# Determine the clusters for various resolutions                                
+ventricular.cells.3000 <- FindClusters(object = ventricular.cells.3000,
+                               resolution = c(0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+ventricular.cells.3000 <- RunUMAP(ventricular.cells.3000, dims = 1:40)
+
+# Plot the UMAP
+# Assign identity of clusters
+Idents(object = ventricular.cells.3000) <- "SCT_snn_res.0.6"
+
+# UMAP of cells in each cluster by sample
+DimPlot(ventricular.cells.3000, 
+        label = TRUE, 
+        split.by = "orig.ident")  + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/SplitSamples.UMAP.res.0.6.3000.pdf", width = 15, height = 5)
+
+DimPlot(ventricular.cells.3000, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        #cols = DiscretePalette(12, palette = "stepped")[c(1,5,9,3,7,11,4,8,12)],
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/MergedSamples.UMAP.res.0.6.3000.pdf", width = 10, height = 8)
+
+DimPlot(ventricular.cells.3000, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        cols = custom_colors$discrete,
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/UMAP/MergedSamples.UMAP.res.0.6.diff.colors.3000.pdf", width = 10, height = 8)
+
+#length(intersect(rownames(filtered.D34.samples[["SCT"]]@scale.data), rownames(ventricular.cells.3000[["SCT"]]@scale.data)))
+#[1] 2762
+```
+Less batch effect was observed using top 3000 genes.
+
+
+#####################################################################################################################
+#####################################################################################################################
+#####################################################################################################################
+Decide to do integration for the 3 replicates to see if batch effect is still observed using top 5000 variable genes.
+```{r}
+# split the dataset into a list of three seurat objects (each for one sample)
+ventricular.list <- SplitObject(ventricular.cells, split.by = "orig.ident")
+
+# normalize and identify variable features for each dataset independently
+ventricular.list <- lapply(X = ventricular.list, FUN = function(x) {
+    x <- SCTransform(x, method = "glmGamPoi", vars.to.regress = c("G2M.Score", "S.Score"), variable.features.n = 5000)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = ventricular.list, nfeatures = 5000)
+ventricular.list <- PrepSCTIntegration(object.list = ventricular.list, anchor.features = features)
+
+# Perform integration
+ventricular.anchors <- FindIntegrationAnchors(object.list = ventricular.list, normalization.method = "SCT", anchor.features = features)
+ventricular.combined.sct <- IntegrateData(anchorset = ventricular.anchors, normalization.method = "SCT")
+
+ventricular.combined.sct <- RunPCA(ventricular.combined.sct, verbose = FALSE)
+ventricular.combined.sct <- RunUMAP(ventricular.combined.sct, reduction = "pca", dims = 1:40)
+
+ventricular.combined.sct <- FindNeighbors(ventricular.combined.sct, reduction = "pca", dims = 1:40)
+ventricular.combined.sct <- FindClusters(ventricular.combined.sct, resolution = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+Idents(object = ventricular.combined.sct) <- "integrated_snn_res.0.6"
+DimPlot(ventricular.combined.sct,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/UMAP.res.0.6.D34.cells.5000.features.pdf", width = 10, height = 8)
+
+#Segregation of clusters by sample
+# UMAP of cells in each cluster by sample
+DimPlot(ventricular.combined.sct, 
+        label = TRUE, 
+        split.by = "orig.ident")  + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/SplitSamples.UMAP.res.0.6.D34.cells.top.5000.features.pdf", width = 15, height = 5)
+
+DimPlot(ventricular.combined.sct, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        #cols = DiscretePalette(12, palette = "stepped")[c(1,5,9,3,7,11,4,8,12)],
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/MergedSamples.UMAP.res.0.6.D34.cells.top.5000.features.pdf", width = 10, height = 8)
+
+DimPlot(ventricular.combined.sct, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        cols = custom_colors$discrete,
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/MergedSamples.UMAP.res.0.6.diff.colors.D34.cells.top.5000.features.pdf", width = 10, height = 8)
+```
+
+
+
+```{r}
+# Count the number of clusters at different resolutions.
+ventricular.combined.sct@meta.data <- select(ventricular.combined.sct@meta.data, -(11:33))
+Ncluster <- c()
+for(res in c(11:33)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(ventricular.combined.sct@meta.data[,res]))))
+#unique(ventricular.cells@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+```
+
+
+Segregation of clusters by cell cycle phase
+```{r}
+# Explore whether clusters segregate by cell cycle phase
+DimPlot(ventricular.combined.sct,
+        group.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/Merged.CellCycle.UMAP.res.0.6.pdf", width = 10, height = 8)
+DimPlot(ventricular.combined.sct,
+        group.by = "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/Split.CellCycle.UMAP.res.0.6.pdf", width = 25, height = 10)
+```
+
+
+Segregation of clusters by various sources of uninteresting variation
+```{r}
+# Determine metrics to plot present in seurat_integrated@meta.data
+metrics <-  c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "percent.mt")
+
+FeaturePlot(ventricular.combined.sct, 
+            reduction = "umap", 
+            features = metrics,
+            pt.size = 0.4, 
+            order = TRUE,
+            #min.cutoff = 'q10',
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/Metrics.UMAP.res.0.6.pdf", width = 10, height = 10)
+```
+
+
+```{r}
+# Save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+saveRDS(ventricular.combined.sct, file = "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/Clustered.ventricular.combined.sct.rds")
+
+#ventricular.combined.sct <- readRDS("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/Clustered.ventricular.combined.sct.rds")
+```
+
+Exploring known cell type markers
+```{r}
+# Pacemaker cell genes
+FeaturePlot(ventricular.combined.sct, 
+            reduction = "umap", 
+            features = c("TBX18", "SHOX2", "ISL1", "TBX3"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/PacemakerCell_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+# Violin plot
+VlnPlot(ventricular.combined.sct, c("TBX18", "SHOX2", "ISL1", "TBX3"), group.by = "orig.ident", pt.size = 0, cols = custom_colors$discrete, ncol = 4)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/PacemakerCell_Genes.Violin.UMAP.res.0.6.pdf", width = 16, height = 5)
+```
+
+```{r}
+DotPlot(ventricular.combined.sct, features = rev(c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2")), cols= "Spectral", group.by = "orig.ident") + RotatedAxis() + coord_flip()
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/James_Markers_DotPlot.UMAP.res.0.6.pdf", width = 8, height = 6)
+```
+
+```{r}
+# Single cell heatmap of feature expression
+DoHeatmap(ventricular.combined.sct, features = c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2"), size = 3, group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/James_Markers_Heatmap.UMAP.res.0.6.pdf")
+```
+
+Composition of samples and clusters
+```{r}
+table_samples_by_clusters <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident, integrated_snn_res.0.6) %>%
+  summarize(count = n()) %>%
+  spread(integrated_snn_res.0.6, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  dplyr::select(c('orig.ident', 'total_cell_count', everything())) %>%
+  arrange(factor(orig.ident, levels = levels(ventricular.combined.sct@meta.data$orig.ident)))
+write.table(as.data.frame(table_samples_by_clusters), "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters.txt", quote = F, sep = "\t")
+
+table_clusters_by_samples <- ventricular.combined.sct@meta.data %>%
+  dplyr::rename('cluster' = 'integrated_snn_res.0.6') %>%
+  group_by(cluster, orig.ident) %>%
+  summarize(count = n()) %>%
+  spread(orig.ident, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  select(c('cluster', 'total_cell_count', everything())) %>%
+  arrange(factor(cluster, levels = levels(ventricular.combined.sct@meta.data$integrated_snn_res.0.6)))
+write.table(as.data.frame(table_clusters_by_samples), "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples.txt", quote = F, sep = "\t")
+
+# Plot number of cells.
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = unique(ventricular.combined.sct@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 3, angle = 0
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of cells', labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = 1, vjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters_cell_number.pdf", p1, width = 8, height = 5)
+
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(integrated_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = integrated_snn_res.0.6)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = sort(unique(ventricular.combined.sct@meta.data$integrated_snn_res.0.6)))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples_cell_number.pdf", p2, width = 10, height = 5)
+
+# Plot percent of cells.
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = unique(ventricular.combined.sct@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters_cell_percent.pdf", p1, width = 8, height = 5)
+
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(integrated_snn_res.0.6) %>%
+  tally() %>%
+  dplyr::rename('cluster' = integrated_snn_res.0.6)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = sort(unique(ventricular.combined.sct@meta.data$integrated_snn_res.0.6)))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels, aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples_cell_percent.pdf", p2, width = 10, height = 5)
+```
+
+
+```{r}
+require(rBCS)
+#ventricular.combined.sct@meta.data <- select(ventricular.combined.sct@meta.data, -seurat_clusters)
+ventricular.combined.sct@meta.data <- mutate(ventricular.combined.sct@meta.data, seurat_clusters = ventricular.combined.sct@meta.data$integrated_snn_res.0.6)
+ventricular.combined.sct@meta.data <- select(ventricular.combined.sct@meta.data, Sample = orig.ident, seurat_clusters, everything())
+ExportSeurat(ventricular.combined.sct, "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/Clustered.ventricular.combined.sct.bcs")
+```
+
+
+Silhouette plot
+```{r}
+distance_matrix <- dist(Embeddings(ventricular.combined.sct[['pca']])[, 1:40])
+
+sil_score_matrix <- matrix(NA, nrow=dim(ventricular.combined.sct@meta.data)[1], ncol=23)
+for(i in 11:33){
+  clusters <- ventricular.combined.sct@meta.data[,i]
+  silhouette <- silhouette(as.numeric(clusters), dist = distance_matrix)
+  sil_score_matrix[,i-10] <- silhouette[,3]
+}
+
+colnames(sil_score_matrix) = paste0("silhouette_score_res.", c(seq(0.01,0.09,0.01), 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+ventricular.combined.sct@meta.data <- cbind(ventricular.combined.sct@meta.data, sil_score_matrix)
+
+#ventricular.combined.sct@meta.data <- select(ventricular.combined.sct@meta.data, -35)
+
+for(i in 34:56){
+#for(i in 35){
+  mean_silhouette_score <- mean(ventricular.combined.sct@meta.data[,i])
+  tmp <- select(ventricular.combined.sct@meta.data, c(i-23, i))
+  colnames(tmp) <- c("Cluster", "Sil_score")
+  tmp <- mutate(tmp, barcode =  rownames(tmp))
+  tmp <- arrange(tmp, Cluster, desc(Sil_score))
+  tmp$barcode = factor(tmp$barcode, levels = tmp$barcode)
+  p <- 
+    ggplot(tmp) +
+    #geom_col(aes(barcode, ventricular.combined.sct@meta.data[,i], fill = ventricular.combined.sct@meta.data)[,i-24], show.legend = TRUE) +
+    geom_col(aes(barcode, Sil_score, fill = Cluster), show.legend = TRUE) +
+    geom_hline(yintercept = mean_silhouette_score, color = 'red', linetype = 'dashed') +
+    #scale_x_discrete(name = 'Cells') +
+    xlab("Clusters") +
+    ylab("Silhouette Score") +
+    #scale_y_continuous(name = 'Silhouette score') +
+    scale_fill_manual(values = custom_colors$discrete, name = 'Clusters') +
+    theme_bw() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+    ggsave(paste0("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/PCs/silhouette_plot_", names(ventricular.combined.sct@meta.data)[i], ".pdf"), p, height = 5, width = 8)
+}
+
+tmp_score <- select(ventricular.combined.sct@meta.data, 34:56)
+library(reshape2)
+long_tmp_score <- melt(tmp_score)
+
+long_tmp_score$variable = str_replace(long_tmp_score$variable, "silhouette_score_res.", "")
+
+library(ggpubr)
+ggviolin(long_tmp_score, "variable", "value", fill = "variable",
+   palette = custom_colors$discrete,
+   add = "boxplot", add.params = list(fill = "white"), xlab = "Resolution", ylab = "Silhouette Score")
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/PCs/silhouette_violin_plot.pdf", width = 10, height = 5)
+
+
+write.table(as.data.frame(colMeans(tmp_score)),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/PCs/ResolutionVsMean_Sil_Score.txt", quote = F, sep = "\t", row.names = T)
+colMeans(tmp_score)
+write.table(as.data.frame(apply(tmp_score,2,median)),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/PCs/ResolutionVsMedian_Sil_Score.txt", quote = F, sep = "\t", row.names = T)
+
+```
+
+Find markers at Res 0.6
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+ventricular.combined.sct.markers <- FindAllMarkers(ventricular.combined.sct, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(ventricular.combined.sct.markers, file="/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.6.RData")
+
+write.table(as.data.frame(ventricular.combined.sct.markers),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.6.txt", quote = F, sep = "\t")
+
+### This version of results were later move to "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/". The original folder "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/" was used for lenient criteria results. Jun 13 2022.
+load("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.6.RData")
+
+ls()
+#[1] "filtered.samples.markers"
+
+filtered.ventricular.samples.markers.fdr <- filter(ventricular.combined.sct.markers, p_val_adj < 0.01)
+
+dim(filtered.ventricular.samples.markers.fdr)
+#[1] 7587    7
+dim(ventricular.combined.sct.markers)
+#[1] 8811    7
+
+filtered.ventricular.samples.markers.fdr %>%
+    group_by(cluster) %>%
+    top_n(n = 100, wt = avg_log2FC) -> top100
+
+write.table(as.data.frame(top100),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.6_top100.txt", quote = F, sep = "\t")
+
+####
+#filtered.ventricular.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.ventricular.samples.markers.fdr$cluster))
+top100list <- matrix(0, nrow = 100, ncol = 20)
+top100_df <- as.data.frame(top100)
+for(i in seq(0,19,1)){
+  j <- i+1
+  top100list[1:length(top100_df[top100_df$cluster == i,7]),j] <- top100_df[top100_df$cluster == i,7]
+}
+colnames(top100list) <- paste0("C_", seq(0,19,1))
+
+#top100list <- select(as.data.frame(top100list), c("C_18","C_6","C_8","C_3","C_15","C_13","C_21","C_12","C_5","C_2","C_10","C_9","C_16","C_26","C_27","C_19","C_20","C_1","C_24","C_23","C_25","C_17","C_22","C_14","C_4","C_7","C_11","C_0"))
+
+write.table(as.data.frame(top100list),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.6_top100list.txt", quote = F, sep = "\t", row.names = F)
+```
+
+
+Find markers at Res 0.2
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+Idents(object = ventricular.combined.sct) <- "integrated_snn_res.0.2"
+ventricular.combined.sct.markers <- FindAllMarkers(ventricular.combined.sct, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(ventricular.combined.sct.markers, file="/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.2.RData")
+
+write.table(as.data.frame(ventricular.combined.sct.markers),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.2.txt", quote = F, sep = "\t")
+
+filtered.ventricular.samples.markers.fdr <- filter(filtered.samples.markers, p_val_adj < 0.01)
+
+dim(filtered.ventricular.samples.markers.fdr)
+#[1] 25568     7
+dim(filtered.samples.markers)
+#[1] 26027     7
+
+filtered.ventricular.samples.markers.fdr %>%
+    group_by(cluster) %>%
+    top_n(n = 100, wt = avg_log2FC) -> top100
+
+write.table(as.data.frame(top100),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.2_top100.txt", quote = F, sep = "\t")
+
+####
+#filtered.ventricular.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.ventricular.samples.markers.fdr$cluster))
+top100list <- matrix(0, nrow = 100, ncol = 10)
+top100_df <- as.data.frame(top100)
+for(i in seq(0,9,1)){
+  j <- i+1
+  top100list[1:length(top100_df[top100_df$cluster == i,7]),j] <- top100_df[top100_df$cluster == i,7]
+}
+colnames(top100list) <- paste0("C_", seq(0,9,1))
+
+#top100list <- select(as.data.frame(top100list), c("C_18","C_6","C_8","C_3","C_15","C_13","C_21","C_12","C_5","C_2","C_10","C_9","C_16","C_26","C_27","C_19","C_20","C_1","C_24","C_23","C_25","C_17","C_22","C_14","C_4","C_7","C_11","C_0"))
+
+write.table(as.data.frame(top100list),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.2_top100list.txt", quote = F, sep = "\t", row.names = F)
+```
+
+```{r}
+Idents(object = ventricular.combined.sct) <- "integrated_snn_res.0.4"
+DimPlot(ventricular.combined.sct,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6,
+        cols = custom_colors$discrete)
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/UMAP.res.0.4.D34.cells.5000.features.pdf", width = 10, height = 8)
+
+```
+
+Composition of samples and clusters
+```{r}
+table_samples_by_clusters <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident, integrated_snn_res.0.4) %>%
+  summarize(count = n()) %>%
+  spread(integrated_snn_res.0.4, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  dplyr::select(c('orig.ident', 'total_cell_count', everything())) %>%
+  arrange(factor(orig.ident, levels = levels(ventricular.combined.sct@meta.data$orig.ident)))
+write.table(as.data.frame(table_samples_by_clusters), "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters_Res0.4.txt", quote = F, sep = "\t")
+
+table_clusters_by_samples <- ventricular.combined.sct@meta.data %>%
+  dplyr::rename('cluster' = 'integrated_snn_res.0.4') %>%
+  group_by(cluster, orig.ident) %>%
+  summarize(count = n()) %>%
+  spread(orig.ident, count, fill = 0) %>%
+  ungroup() %>%
+  mutate(total_cell_count = rowSums(.[c(2:ncol(.))])) %>%
+  select(c('cluster', 'total_cell_count', everything())) %>%
+  arrange(factor(cluster, levels = levels(ventricular.combined.sct@meta.data$integrated_snn_res.0.4)))
+write.table(as.data.frame(table_clusters_by_samples), "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples_Res0.4.txt", quote = F, sep = "\t")
+
+# Plot number of cells.
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = unique(ventricular.combined.sct@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 3, angle = 0
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of cells', labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = 1, vjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters_cell_number_Res0.4.pdf", p1, width = 8, height = 5)
+
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(integrated_snn_res.0.4) %>%
+  tally() %>%
+  dplyr::rename('cluster' = integrated_snn_res.0.4)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = sort(unique(ventricular.combined.sct@meta.data$integrated_snn_res.0.4)))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'stack', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(labels = scales::comma, expand = c(0.01, 0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples_cell_number_Res0.4.pdf", p2, width = 10, height = 5)
+
+# Plot percent of cells.
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(orig.ident) %>%
+  tally()
+
+p1 <- table_samples_by_clusters %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'orig.ident') %>%
+  mutate(sample = factor(orig.ident, levels = unique(ventricular.combined.sct@meta.data$orig.ident))) %>%
+  ggplot(aes(sample, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels,
+    aes(x = orig.ident, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Cluster', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'left',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 0, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_samples_by_clusters_cell_percent_Res0.4.pdf", p1, width = 8, height = 5)
+
+temp_labels <- ventricular.combined.sct@meta.data %>%
+  group_by(integrated_snn_res.0.4) %>%
+  tally() %>%
+  dplyr::rename('cluster' = integrated_snn_res.0.4)
+
+p2 <- table_clusters_by_samples %>%
+  select(-c('total_cell_count')) %>%
+  reshape2::melt(id.vars = 'cluster') %>%
+  mutate(cluster = factor(cluster, levels = sort(unique(ventricular.combined.sct@meta.data$integrated_snn_res.0.4)))) %>%
+  ggplot(aes(cluster, value)) +
+  geom_bar(aes(fill = variable), position = 'fill', stat = 'identity') +
+  geom_text(
+    data = temp_labels, aes(x = cluster, y = Inf, label = paste0('', format(n, big.mark = ',', trim = TRUE)), vjust = -1),
+    color = 'black', size = 2.8
+  ) +
+  scale_fill_manual(name = 'Sample', values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Percentage [%]', labels = scales::percent_format(), expand = c(0.01,0)) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(
+    legend.position = 'right',
+    plot.title = element_text(hjust = 0.5),
+    text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 10, unit = 'pt')
+  )
+ggsave("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/table_clusters_by_samples_cell_percent_Res0.4.pdf", p2, width = 10, height = 5)
+```
+
+Find markers at Res 0.4
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+ventricular.combined.sct.markers <- FindAllMarkers(ventricular.combined.sct, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(ventricular.combined.sct.markers, file="/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.4.RData")
+
+write.table(as.data.frame(ventricular.combined.sct.markers),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.4.txt", quote = F, sep = "\t")
+
+### This version of results were later move to "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/". The original folder "/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/" was used for lenient criteria results. Jun 13 2022.
+#load("/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.4.RData")
+
+ls()
+#[1] "filtered.samples.markers"
+
+filtered.ventricular.samples.markers.fdr <- filter(ventricular.combined.sct.markers, p_val_adj < 0.01)
+
+table(filtered.ventricular.samples.markers.fdr$cluster)
+#   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14 
+# 162  159  366  681   86  200  698  198  335 1320  183  818  692  130  385
+
+filtered.ventricular.samples.markers.fdr.log2fc <- filter(ventricular.combined.sct.markers, p_val_adj < 0.01 & avg_log2FC > log2(1.5))
+
+table(filtered.ventricular.samples.markers.fdr.log2fc$cluster)
+#   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14 
+# 133  130  317  643   59  180  649  160  300 1265  174  792  678  121  382 
+
+dim(filtered.ventricular.samples.markers.fdr.log2fc)
+#[1] 5983    7
+dim(filtered.ventricular.samples.markers.fdr)
+#[1] 6413    7
+dim(ventricular.combined.sct.markers)
+#[1] 7257    7
+
+filtered.ventricular.samples.markers.fdr.log2fc %>%
+    group_by(cluster) %>%
+    slice_max(n = 100, order_by = -p_val_adj) -> top100
+
+filtered.ventricular.samples.markers.fdr.log2fc %>%
+    group_by(cluster) %>%
+    slice_head(n = 100) -> top100
+
+write.table(as.data.frame(top100),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.4_top100_fdr.txt", quote = F, sep = "\t")
+####
+#filtered.pacemaker.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.pacemaker.samples.markers.fdr$cluster))
+top100list <- matrix(0, nrow = 100, ncol = 15)
+top100_df <- as.data.frame(top100)
+for(i in seq(0,14,1)){
+  j <- i+1
+  top100list[1:length(top100_df[top100_df$cluster == i,7]),j] <- top100_df[top100_df$cluster == i,7]
+}
+colnames(top100list) <- paste0("C_", seq(0,14,1))
+
+#top100list <- select(as.data.frame(top100list), c("C_18","C_6","C_8","C_3","C_15","C_13","C_21","C_12","C_5","C_2","C_10","C_9","C_16","C_26","C_27","C_19","C_20","C_1","C_24","C_23","C_25","C_17","C_22","C_14","C_4","C_7","C_11","C_0"))
+
+write.table(as.data.frame(top100list),"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/FindAllMarkers_Res0.4_top100list.txt", quote = F, sep = "\t", row.names = F)
+```
+
+```{r}
+cellnumber <-  as.data.frame(table(ventricular.combined.sct@meta.data$integrated_snn_res.0.4))
+names(cellnumber) <- c("Cluster","CellNumber")
+write.table(cellnumber,"/Data/iPSC_pacemaker/Seurat/D34_First/VentricularCells/Integration/UMAP/Res0.4_CellNumber.txt", quote = F, sep = "\t", row.names = F)
+```
+
+
+
+
+
+
+
+

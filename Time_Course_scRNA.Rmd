@@ -1,0 +1,1821 @@
+---
+title: "Time course dataset"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(RColorBrewer)
+library(scDblFinder)
+library(SummarizedExperiment)
+library(stringr)
+library(tidyr)
+library(ggforce)
+library(cluster)
+library(rBCS)
+library(ggrepel)
+library(reshape2)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+# Define colors
+custom_colors <- list()
+colors_dutch <- c(
+  '#FFC312','#C4E538','#12CBC4','#FDA7DF','#ED4C67',
+  '#F79F1F','#A3CB38','#1289A7','#D980FA','#B53471',
+  '#EE5A24','#009432','#0652DD','#9980FA','#833471',
+  '#EA2027','#006266','#1B1464','#5758BB','#6F1E51'
+)
+
+colors_spanish <- c(
+  '#40407a','#706fd3','#f7f1e3','#34ace0','#33d9b2',
+  '#2c2c54','#474787','#aaa69d','#227093','#218c74',
+  '#ff5252','#ff793f','#d1ccc0','#ffb142','#ffda79',
+  '#b33939','#cd6133','#84817a','#cC31e35','#ccae62'
+)
+
+custom_colors$discrete <- c(colors_dutch, colors_spanish)
+```
+
+
+
+```{r}
+## Read the pilot data.
+D34_r0_P.data <- Read10X(data.dir = "/gau/isilon/int/singlecell_runs/211106_10x_iPSCpacemaker/d34_P_r1/outs/filtered_feature_bc_matrix")
+D34_r0_P <- CreateSeuratObject(counts = D34_r0_P.data, project = "D34_r0_P")
+```
+
+```{r}
+## Read other pacemaker cell samples in the study phase data.
+for (file in c("D3_r1","D3_r2","D4_r1","D4_r2","D6_r1","D6_r2","D10_r1","D10_r2","D23_r1","D23_r2","D34_r1_P", "D34_r2_P")){
+        seurat_data <- Read10X(data.dir = paste0("/gau/isilon/int/singlecell_runs/220207_10x_iPSC_pacemaker_studyphase_RNA/", file, "/outs/filtered_feature_bc_matrix"))
+        seurat_obj <- CreateSeuratObject(counts = seurat_data, 
+                                         project = file)
+        assign(file, seurat_obj)
+}
+```
+
+```{r}
+## Merge all pacemaker samples together
+Pacemaker.cell.samples <- merge(D3_r1, y = c(D3_r2, D4_r1, D4_r2, D6_r1, D6_r2, D10_r1, D10_r2, D23_r1, D23_r2, D34_r0_P, D34_r1_P, D34_r2_P), add.cell.ids = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"), project = "Pacemaker.cell.samples")
+
+head(colnames(Pacemaker.cell.samples))
+table(Pacemaker.cell.samples$orig.ident)
+```
+
+```{r}
+# Visualize the number of cell counts per sample
+tmp.meta.data <- Pacemaker.cell.samples@meta.data
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = names(sort(table(tmp.meta.data$orig.ident))))
+tmp.meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar() +
+  	#theme_classic() +
+  	theme(axis.text.x = element_text(angle = 0, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = 'none') +
+  	ggtitle("NCells") +
+    scale_fill_manual(values = custom_colors$discrete) +
+    coord_flip() + ylab("Cell Count") + xlab("Sample")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/Cell_Counts.pdf", height = 5, width = 6)
+```
+
+```{r}
+# Identify doublets for each sample separately.
+#sce <- data.frame(orig.ident=c(), nCount_RNA=c(),nFeature_RNA=c(),ident=c(),scDblFinder.weighted=c(),scDblFinder.ratio=c(), scDblFinder.score=c(), scDblFinder.class=c())
+sce <- data.frame()
+for(sample in c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P")){
+  tmp_subset <- subset(Pacemaker.cell.samples, subset = orig.ident == sample)
+  tmp_sce <- scDblFinder(as.SingleCellExperiment(tmp_subset))
+  sce <- rbind(sce, as.data.frame(colData(tmp_sce)))
+  p1 <- ggplot(as.data.frame(colData(tmp_sce)), aes(x =scDblFinder.class, y = nCount_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(Pacemaker.cell.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of transcripts', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+  p2 <- ggplot(as.data.frame(colData(tmp_sce)), aes(x = scDblFinder.class, y = nFeature_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(Pacemaker.cell.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of expressed genes', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+  ggsave(
+    paste0("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/QC_ncount_nfeature_by_multiplet_class_",sample,".png"),
+    p1 + p2 + plot_layout(ncol = 2),
+    height = 7, width = 10
+  )
+}
+
+# Check the doublet vs. singlet when putting the results for all samples together.
+p1 <- ggplot(sce, aes(x =scDblFinder.class, y = nCount_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(Pacemaker.cell.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of transcripts', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+
+p2 <- ggplot(sce, aes(x = scDblFinder.class, y = nFeature_RNA, fill = scDblFinder.class)) +
+    geom_violin(draw_quantiles = c(0.5), scale = 'area', trim = FALSE) +
+    theme_bw() +
+    scale_fill_manual(values = custom_colors$discrete) +
+    #scale_x_discrete(limits = rev(levels(Pacemaker.cell.samples@meta.data$multiplet_class))) +
+    scale_y_log10(labels = scales::comma) +
+    labs(title = 'Number of expressed genes', subtitle = 'log-scale') +
+    theme(
+      axis.title = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      legend.position = 'none'
+    ) +
+    coord_flip()
+ggsave(
+    paste0("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/QC_ncount_nfeature_by_multiplet_class_","all_samples",".png"),
+    p1 + p2 + plot_layout(ncol = 2),
+    height = 7, width = 10
+  )
+
+# Deposit the multiplet class to Seurat Object.
+table(rownames(sce)==rownames(Pacemaker.cell.samples@meta.data))
+#sce <- rbind(sce, as.data.frame(colData(sce_D3_r1)))
+#subset_D3_r1 <- subset(Pacemaker.cell.samples, subset = orig.ident == "D3_r1")
+#sce_D3_r1 <- scDblFinder(as.SingleCellExperiment(subset_D3_r1))
+#hahaha<-as.SingleCellExperiment(Pacemaker.cell.samples)
+
+Pacemaker.cell.samples$multiplet_class <- sce$scDblFinder.class
+
+doublet_count <- Pacemaker.cell.samples@meta.data %>%
+  filter(multiplet_class != 'singlet') %>%
+  group_by(orig.ident) %>%
+  summarize(count = n()) %>% 
+  as.data.frame() %>%
+  arrange(count)
+
+doublet_count$orig.ident = factor(doublet_count$orig.ident, levels = levels(tmp.meta.data$orig.ident))
+ggplot(doublet_count, aes(x = orig.ident, y = count, fill = orig.ident)) +
+  geom_col(color = 'black') +
+  theme_bw() +
+  scale_fill_manual(values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Number of doublets', labels = scales::comma) +
+  theme(
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = 'none'
+  ) +
+  coord_flip()
+
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/QC_number_of_doublets_by_sample.pdf", height = 5, width = 6)
+
+# Calculate ratio of doublet.
+tmp.cell.count <- as.data.frame(table(tmp.meta.data$orig.ident))
+doublet_ratio <- merge(doublet_count, tmp.cell.count, by.x = "orig.ident", by.y = "Var1")
+names(doublet_ratio) <- c("orig.ident", "doublet.count", "cell.count")
+doublet_ratio <- mutate(doublet_ratio, doublet.ratio = doublet.count/cell.count)
+doublet_ratio <- arrange(doublet_ratio, doublet.ratio)
+doublet_ratio$orig.ident = factor(doublet_ratio$orig.ident, levels = doublet_ratio$orig.ident)
+
+ggplot(doublet_ratio, aes(x = orig.ident, y = doublet.ratio, fill = orig.ident)) +
+  geom_col(color = 'black') +
+  theme_bw() +
+  scale_fill_manual(values = custom_colors$discrete) +
+  scale_y_continuous(name = 'Proportion of doublets', labels = scales::comma) +
+  theme(
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = 'none'
+  ) +
+  coord_flip()
+
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/QC_proportion_of_doublets_by_sample.pdf", height = 5, width = 6)
+write.table(doublet_ratio, "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/QC_proportion_of_doublets_by_sample.txt", sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r}
+# Add number of genes per UMI for each cell to metadata
+Pacemaker.cell.samples$log10GenesPerUMI <- log10(Pacemaker.cell.samples$nFeature_RNA) / log10(Pacemaker.cell.samples$nCount_RNA)
+```
+
+
+```{r}
+## Calculate the percentage of reads that map to the mitochondrial genome
+Pacemaker.cell.samples[["percent.mt"]] <- PercentageFeatureSet(Pacemaker.cell.samples, pattern = "^MT-")
+head(Pacemaker.cell.samples@meta.data, 5)
+# Create .RData object to load at any time
+#save(Pacemaker.cell.samples, file="/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Pacemaker.Cell.Samples.seurat.RData")
+#load("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/D34_seurat.RData")
+```
+
+```{r}
+# Visualize QC metrics as a violin plot
+median_nFeature <- median(Pacemaker.cell.samples$nFeature_RNA)
+# 4364
+mad_nFeature <- mad(Pacemaker.cell.samples$nFeature_RNA)
+# [1] 1673.855
+Pacemaker.cell.samples$orig.ident = factor(Pacemaker.cell.samples$orig.ident, levels = unique(Pacemaker.cell.samples$orig.ident))
+VlnPlot(Pacemaker.cell.samples, features = "nFeature_RNA", group.by = "orig.ident", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12])) + geom_hline(yintercept = c(500, 2000, 10000), linetype = 2) + scale_y_continuous(breaks=seq(0,10000,1000)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/nFeature_RNA.pdf")
+
+median_nCount <- median(Pacemaker.cell.samples$nCount_RNA)
+median_nCount
+# 17280
+mad_nCount <- mad(Pacemaker.cell.samples$nCount_RNA)
+mad_nCount
+# 10809.64
+VlnPlot(Pacemaker.cell.samples, features = "nCount_RNA", group.by = "orig.ident", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12])) + geom_hline(yintercept = c(1500, 5000, 80000), linetype = 2) + scale_y_continuous(breaks=seq(0,150000,30000)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/nCount_RNA.pdf")
+
+median_percent.mt <- median(Pacemaker.cell.samples$percent.mt)
+median_percent.mt
+# 5.313547
+mad_percent.mt <- mad(Pacemaker.cell.samples$percent.mt)
+mad_percent.mt
+# 3.095939
+VlnPlot(Pacemaker.cell.samples, features = "percent.mt", group.by = "orig.ident", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12])) + geom_hline(yintercept = c(10, 15, 40), linetype = 2) + scale_y_continuous(breaks=seq(0,100,20)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/percent.mt.pdf")
+```
+
+```{r}
+# Visualize the number UMIs/transcripts per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density") +
+  	geom_vline(xintercept = c(1500, 80000))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/UMI_Counts_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the distribution of genes detected per cell via histogram
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = c(500, 1000, 7000, 9000, 10000)) +
+    #scale_color_manual(values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+  
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/Gene_Counts_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+tmp.meta.data = Pacemaker.cell.samples@meta.data
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = unique(tmp.meta.data$orig.ident))
+tmp.meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "orange") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) +
+  	facet_wrap(~orig.ident)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/Cor_UMI&Genes.pdf", width = 20, height = 15)
+```
+
+```{r}
+# Visualize the distribution of mitochondrial gene expression detected per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=percent.mt, fill=orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	#scale_x_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept =c(30,40,50))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/percent.mt_DensityPlot.pdf")
+```
+
+```{r}
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI
+tmp.meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/Complexity_DensityPlot.pdf")
+```
+
+
+```{r}
+# Filter out low quality cells using selected thresholds - these will change with experiment
+# Apply more stringent cutoff for percent.mt for early time points.
+
+Pacemaker.cell.samples
+#An object of class Seurat 
+#36601 features across 122589 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+D3toD6.pacemaker.samples <- subset(x = Pacemaker.cell.samples, 
+                         subset= orig.ident == "D3_r1" | 
+                           orig.ident == "D3_r2" | 
+                           orig.ident == "D4_r1" | 
+                           orig.ident == "D4_r2" | 
+                           orig.ident == "D6_r1" | 
+                           orig.ident == "D6_r2")
+D3toD6.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 58189 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+Filtered.D3toD6.pacemaker.samples <- subset(x = D3toD6.pacemaker.samples, 
+                                   subset = (nCount_RNA > 5000) &
+                                     (nCount_RNA < 80000) &
+                                     (nFeature_RNA > 2000) &
+                                     (nFeature_RNA < 10000) &
+                                     (percent.mt < 10))
+Filtered.D3toD6.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 48697 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+  
+D10toD23.pacemaker.samples <- subset(x = Pacemaker.cell.samples, 
+                         subset= orig.ident == "D10_r1" | 
+                           orig.ident == "D10_r2" | 
+                           orig.ident == "D23_r1" | 
+                           orig.ident == "D23_r2")
+D10toD23.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 39364 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+Filtered.D10toD23.pacemaker.samples <- subset(x = D10toD23.pacemaker.samples, 
+                                   subset = (nCount_RNA > 5000) &
+                                     (nCount_RNA < 80000) &
+                                     (nFeature_RNA > 2000) &
+                                     (nFeature_RNA < 10000) &
+                                     (percent.mt < 15))
+Filtered.D10toD23.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 34761 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+D34.pacemaker.samples <- subset(x = Pacemaker.cell.samples, 
+                         subset= orig.ident == "D34_r0_P" | 
+                           orig.ident == "D34_r1_P" | 
+                           orig.ident == "D34_r2_P")
+D34.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 25036 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+Filtered.D34.pacemaker.samples <- subset(x = D34.pacemaker.samples, 
+                                   subset = (nCount_RNA > 5000) &
+                                     (nCount_RNA < 80000) &
+                                     (nFeature_RNA > 2000) &
+                                     (nFeature_RNA < 10000) &
+                                     (percent.mt < 40))
+Filtered.D34.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 19038 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+
+# Merge the filtered samples back together.
+filtered.pacemaker.samples <- merge(Filtered.D3toD6.pacemaker.samples, y = c(Filtered.D10toD23.pacemaker.samples, Filtered.D34.pacemaker.samples), project = "Filtered.pacemaker.samples")
+
+Filtered.pacemaker.samples
+#An object of class Seurat 
+#36601 features across 102496 samples within 1 assay 
+#Active assay: RNA (36601 features, 0 variable features)
+rm(Filtered.D3toD6.pacemaker.samples)
+rm(Filtered.D10toD23.pacemaker.samples)
+rm(Filtered.D34.pacemaker.samples)
+
+rm(D3toD6.pacemaker.samples)
+rm(D10toD23.pacemaker.samples)
+rm(D34.pacemaker.samples)
+
+```
+
+```{r}
+# Gene-level filtering
+# Extract counts
+counts <- GetAssayData(object = filtered.pacemaker.samples, slot = "counts")
+# Output a logical matrix specifying for each gene on whether or not there are more than zero counts per cell
+nonzero <- counts > 0
+
+# Try different cutoffs to choose a min.cell cutoff.
+ngenes_retained <- c()
+for(i in seq(10,100,10)){
+  tmp_keep_genes <- Matrix::rowSums(nonzero) >= i
+  tmp_filtered_counts <- counts[tmp_keep_genes, ]
+  ngenes_retained <- c(ngenes_retained,dim(tmp_filtered_counts)[1])
+}
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/Min.cell.cutoffs.Vs.NGenes.pdf")
+plot(seq(10,100,10), ngenes_retained, type = "o")
+dev.off()
+
+
+# Decide only keeping those genes expressed in more than 30 cells
+keep_genes <- Matrix::rowSums(nonzero) >= 30
+filtered_counts <- counts[keep_genes, ]
+
+# Reassign to filtered Seurat object
+filtered.pacemaker.samples <- CreateSeuratObject(filtered_counts, meta.data = filtered.pacemaker.samples@meta.data)
+
+filtered.pacemaker.samples
+#An object of class Seurat 
+#27586 features across 102496 samples within 1 assay 
+#Active assay: RNA (27586 features, 0 variable features)
+
+table(filtered.pacemaker.samples@meta.data$orig.ident)
+#  D10_r1   D10_r2   D23_r1   D23_r2    D3_r1    D3_r2 D34_r0_P D34_r1_P 
+#    7556    10364     8627     8214     5401     5874     4336     8414 
+#D34_r2_P    D4_r1    D4_r2    D6_r1    D6_r2 
+#    6288     8302     8661    10144    10315
+write.table(as.data.frame(table(filtered.pacemaker.samples@meta.data$orig.ident)), "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/NCells_Postfiltering.txt", quote = F, sep = "\t", row.names = F)
+
+```
+
+```{r}
+# Re-assess QC metrics
+
+# Check the number of retained doublets. Turns out most of them retained.
+write.table(as.data.frame(table(filtered.pacemaker.samples@meta.data$orig.ident, filtered.pacemaker.samples@meta.data$multiplet_class)),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QC_Metrics/NDoublets_Postfiltering.txt", quote = F, sep = "\t", row.names = F)
+
+# Save filtered subset to new metadata
+metadata_clean <- filtered.pacemaker.samples@meta.data
+
+#Perform all of the same QC plots using the filtered data.
+filtered.pacemaker.samples$orig.ident = factor(filtered.pacemaker.samples$orig.ident, levels = unique(filtered.pacemaker.samples$orig.ident))
+VlnPlot(filtered.pacemaker.samples, features = "nFeature_RNA", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]), group.by = "orig.ident") + geom_hline(yintercept = c(500, 2000, 10000), linetype = 2) + scale_y_continuous(breaks=seq(0,10000,1000)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/nFeature_RNA.pdf")
+
+VlnPlot(filtered.pacemaker.samples, features = "nCount_RNA", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]), group.by = "orig.ident") + geom_hline(yintercept = c(1500, 5000, 80000), linetype = 2) + scale_y_continuous(breaks=seq(0,150000,30000)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/nCount_RNA.pdf")
+
+VlnPlot(filtered.pacemaker.samples, features = "percent.mt", pt.size = 0, sort = FALSE, cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]), group.by = "orig.ident") + geom_hline(yintercept = c(10, 15, 40), linetype = 2) + scale_y_continuous(breaks=seq(0,100,20)) + scale_x_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/percent.mt.pdf")
+
+# Visualize the number of cell counts per sample
+tmp.meta.data <- metadata_clean
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = names(sort(table(tmp.meta.data$orig.ident))))
+tmp.meta.data %>% 
+  	ggplot(aes(x=orig.ident, fill=orig.ident)) + 
+  	geom_bar() +
+   #geom_text(aes(label = stat(y), group = orig.ident), stat = 'summary', fun = sum, vjust = -1) +
+  	theme_classic() +
+  	theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  	theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  	ggtitle("NCells") +
+    scale_fill_manual(values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/Cell_Counts.pdf")
+
+# Visualize the number UMIs/transcripts per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nCount_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	scale_x_log10() + 
+  	theme_classic() +
+  	ylab("Cell density") +
+  	geom_vline(xintercept = c(1500, 5000, 80000))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/UMI_Counts_DensityPlot.pdf")
+
+# Visualize the distribution of genes detected per cell via histogram
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=nFeature_RNA, fill= orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	theme_classic() +
+  	scale_x_log10() + 
+  	geom_vline(xintercept = c(500, 1000, 2000, 7000, 9000, 10000))
+  
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/Gene_Counts_DensityPlot.pdf")
+
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+tmp.meta.data$orig.ident=factor(tmp.meta.data$orig.ident, levels = unique(tmp.meta.data$orig.ident))
+tmp.meta.data %>% 
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) +
+    xlim(4000, 81000) +
+    ylim(1000, 11000) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  	facet_wrap(~orig.ident)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/Cor_UMI&Genes.pdf")
+
+# Visualize the distribution of mitochondrial gene expression detected per cell
+tmp.meta.data %>% 
+  	ggplot(aes(color=orig.ident, x=percent.mt, fill=orig.ident)) + 
+  	geom_density(alpha = 0.2) + 
+  	#scale_x_log10() + 
+  	theme_classic() +
+  	geom_vline(xintercept =c(10, 15, 40))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/percent.mt_DensityPlot.pdf")
+
+# Visualize the overall complexity of the gene expression by visualizing the genes detected per UMI
+tmp.meta.data %>%
+  	ggplot(aes(x=log10GenesPerUMI, color = orig.ident, fill=orig.ident)) +
+  	geom_density(alpha = 0.2) +
+  	theme_classic() +
+  	geom_vline(xintercept = 0.8)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/QCed_Metrics/Complexity_DensityPlot.pdf")
+```
+
+```{r}
+# Create .RData object to load at any time
+save(filtered.pacemaker.samples, file="/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/filtered.pacemaker.samples.RData")
+```
+
+
+```{r}
+# Normalize the counts
+seurat_phase <- NormalizeData(filtered.pacemaker.samples)
+```
+
+Evaluating effects of cell cycle.
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Score cells for cell cycle
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.genes, 
+                                 s.features = s.genes)
+
+## Error
+#Warning: The following features are not present in the object: MLF1IP, not searching for symbol synonyms
+#Warning: The following features are not present in the object: FAM64A, HN1, not searching for symbol synonyms
+
+# Manually check the ENSG ID for these three genes and found that:
+## MLF1IP is CENPU in our reference (ENSG00000151725)
+## FAM64A is PIMREG in our reference (ENSG00000129195)
+## HN1 is JPT1 in our reference (ENSG00000189159)
+
+intersect(c("FAM64A", "HN1", "MLF1IP"), s.genes)
+#[1] "MLF1IP"
+intersect(c("FAM64A", "HN1", "MLF1IP"), g2m.genes)
+#[1] "FAM64A" "HN1"
+
+# Manually change the names of these cell cycle genes.
+s.genes[s.genes=="MLF1IP"] = "CENPU"
+g2m.genes[g2m.genes=="FAM64A"] = "PIMREG"
+g2m.genes[g2m.genes=="HN1"] = "JPT1"
+
+# Redo score cells for cell cycle
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.genes, 
+                                 s.features = s.genes)
+# Calculate the percentage of cells in different phases.
+phase_count <- table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase)
+phase_per <- prop.table(table(seurat_phase@meta.data$orig.ident, seurat_phase@meta.data$Phase), 1)*100
+write.table(phase_count, "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/CellCyclePhaseCount.txt", quote = F, sep = "\t")
+write.table(phase_per, "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/CellCyclePhasePercentage.txt", quote = F, sep = "\t")
+
+# Visualize the distribution of cell cycle markers across
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "Phase", ncol = 2) & scale_fill_manual(values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/Cell.cycle.markers.by.phase.pdf")
+
+RidgePlot(seurat_phase, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), group.by = "orig.ident", ncol = 2) & scale_y_discrete(limits = rev(c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))) & scale_fill_manual(values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/Cell.cycle.markers.by.sample.pdf")
+```
+
+```{r}
+# Identify the most variable genes
+seurat_phase <- FindVariableFeatures(seurat_phase, 
+                     selection.method = "vst",
+                     nfeatures = 4000, 
+                     verbose = FALSE)
+		     
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+
+# Perform PCA
+seurat_phase <- RunPCA(seurat_phase, ndims.print = 1:40, nfeatures.print = 10)
+
+# Run UMAP
+seurat_phase <- RunUMAP(seurat_phase, dims = 1:40)
+
+# Plot the UMAP colored by cell cycle phase
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/SplitCellCyclePlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/MergedCellCyclePlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        group.by= "orig.ident") + scale_color_discrete(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/MergedCellCyclePlot_Samples.pdf")
+
+#DimHeatmap(seurat_phase, dims = c(8, 10))
+```
+We do see large differences due to cell cycle. Based on this plot, we would regress out the variation due to cell cycle.
+
+Evaluating effects of mitochodrial expression.
+```{r}
+# Check quartile values
+summary(seurat_phase@meta.data$percent.mt)
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.000   3.804   5.183   7.177   7.987  39.948
+
+# Turn mitoRatio into categorical factor vector based on quartile values
+seurat_phase@meta.data$mitoFr <- cut(seurat_phase@meta.data$percent.mt, 
+                   breaks=c(-Inf, 3.804, 5.183, 7.987, Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+
+# Plot the PCA colored by mitoFr
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr",
+        split.by = "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/SplitMitoFrPlot.pdf")
+
+DimPlot(seurat_phase,
+        reduction = "umap",
+        group.by= "mitoFr")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Covariates/MergedMitoFrPlot.pdf")
+```
+We do not see large differences due to mitochondrial percentage for the same timepoint. Based on this plot, we would not regress out the variation due to mitochondrial percentage.
+
+Add cell cycle score to filtered.pacemaker.samples for SCTransform.
+```{r}
+table(rownames(seurat_phase@meta.data)==rownames(filtered.pacemaker.samples@meta.data))
+filtered.pacemaker.samples@meta.data <- mutate(filtered.pacemaker.samples@meta.data, S.Score = seurat_phase@meta.data$S.Score, G2M.Score = seurat_phase@meta.data$G2M.Score, Phase = seurat_phase@meta.data$Phase)
+```
+
+Apply sctransform normalization while regress out cell cycle scoring.
+```{r}
+# SCTranform
+## Adjust the limit for allowable object sizes within R (Default is 500 * 1024 ^ 2 = 500 Mb) using the following code:
+#options(future.globals.maxSize = 10000 * 1024^2)
+filtered.pacemaker.samples <- SCTransform(filtered.pacemaker.samples, method = "glmGamPoi", vars.to.regress = c("S.Score", "G2M.Score"), variable.features.n = 5000)
+
+# Save the seurat object
+saveRDS(filtered.pacemaker.samples, "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/SCTransform.filtered.pacemaker.samples.rds")
+
+#filtered.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/SCTransform.filtered.samples.rds")
+```
+
+
+```{r}
+filtered.pacemaker.samples <- RunPCA(filtered.pacemaker.samples)
+DimPlot(filtered.pacemaker.samples, reduction = "pca", group.by = "orig.ident") + scale_color_manual(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"), values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/MergedPCAPlot.pdf")
+
+filtered.pacemaker.samples$orig.ident <- factor(filtered.pacemaker.samples$orig.ident, levels = unique(filtered.pacemaker.samples$orig.ident))
+
+DimPlot(filtered.pacemaker.samples, reduction = "pca", split.by = "orig.ident", group.by = "orig.ident") + scale_color_manual(limits = c("D3_r1", "D3_r2", "D4_r1", "D4_r2", "D6_r1", "D6_r2", "D10_r1", "D10_r2", "D23_r1", "D23_r2", "D34_r0_P", "D34_r1_P", "D34_r2_P"), values = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/SplitPCAPlot.pdf", width = 30, height = 5)
+```
+
+Determining how many PCs to include in the clustering step to ensure that we are capturing the majority of the variation, or cell types, present in our dataset.
+```{r}
+# Explore heatmap of PCs
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/HeatmapOfPCs_1_12.pdf", width = 25, height = 15)
+#DimHeatmap(filtered.pacemaker.samples, dims = 1:25, cells = 500, balanced = TRUE, fast = FALSE)
+DimHeatmap(filtered.pacemaker.samples, dims = 1:12, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/HeatmapOfPCs_13_24.pdf", width = 25, height = 15)
+DimHeatmap(filtered.pacemaker.samples, dims = 13:24, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/HeatmapOfPCs_25_36.pdf", width = 25, height = 15)
+DimHeatmap(filtered.pacemaker.samples, dims = 25:36, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/HeatmapOfPCs_37_48.pdf", width = 25, height = 15)
+DimHeatmap(filtered.pacemaker.samples, dims = 37:48, cells = 500, balanced = TRUE)
+dev.off()
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/HeatmapOfPCs_49_50.pdf", width = 25, height = 15)
+DimHeatmap(filtered.pacemaker.samples, dims = 49:50, cells = 500, balanced = TRUE)
+dev.off()
+
+# Plot the elbow plot
+ElbowPlot(object = filtered.pacemaker.samples, ndims = 50)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/PCs/ElbowPlot.pdf")
+```
+Decision: Use the first 40 PCs to generate the clusters.
+
+Cluster the cells
+```{r}
+# Determine the K-nearest neighbor graph
+filtered.pacemaker.samples <- FindNeighbors(object = filtered.pacemaker.samples, 
+                                dims = 1:40)
+                                
+# Determine the clusters for various resolutions                                
+filtered.pacemaker.samples <- FindClusters(object = filtered.pacemaker.samples,
+                               resolution = c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0))
+
+# Add more resolution later.
+filtered.pacemaker.samples <- FindClusters(object = filtered.pacemaker.samples,
+                               resolution = c(0.1, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 1.9, 2.1))
+
+# Output newly added resolution to import into bioturing.
+add.resolution <- as.data.frame(filtered.pacemaker.samples@meta.data)
+add.resolution <- mutate(add.resolution, Barcodes = rownames(add.resolution)) %>% select(Barcodes, 25:35)
+write.table(add.resolution, "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/add.resolution.txt", sep = "\t", quote = F, row.names = F)
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(filtered.pacemaker.samples), 5)
+
+# Count the number of clusters at different resolutions.
+Ncluster <- c()
+for(res in c(12:22)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(filtered.pacemaker.samples@meta.data[,res]))))
+#unique(filtered.pacemaker.samples@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 3.0), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+```
+
+Run non-linear dimensional reduction (UMAP/tSNE)
+```{r}
+filtered.pacemaker.samples <- RunUMAP(filtered.pacemaker.samples, dims = 1:40)
+
+# Plot the UMAP
+# Assign identity of clusters
+Idents(object = filtered.pacemaker.samples) <- "SCT_snn_res.0.6"
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.pdf", width = 10, height = 8)
+
+# Flip the UMAP coordinates so that early time points are on the left.
+
+tmp_umap_coordinates <- filtered.pacemaker.samples[["umap"]]@cell.embeddings
+tmp_umap_coordinates <- -tmp_umap_coordinates
+filtered.pacemaker.samples[["umap"]]@cell.embeddings <- tmp_umap_coordinates
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c(paletteer_d("ggthemes::Tableau_20"),paletteer_d("ggthemes::Miller_Stone")),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.Tableau_20.color.pdf", width = 10, height = 8)
+```
+
+Test color palettes.
+```{r}
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = DiscretePalette(n = 30, palette = "glasbey"),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.glasbey.color.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggsci::default_igv"),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.ggsci.color.pdf", width = 10, height = 8)
+
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = custom_colors$discrete,
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.custom.color.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c(paletteer_d("ggthemes::Classic_20"),paletteer_d("ggthemes::Classic_Green_Orange_12")[7:12],paletteer_d("ggthemes::hc_fg")),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.ggthemes.color.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c(paletteer_d("ggsci::planetexpress_futurama"),paletteer_d("ggsci::springfield_simpsons")),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.planetexpress_futurama.color.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c(paletteer_d("ggthemes::Classic_Green_Orange_12"),paletteer_d("ggthemes::Classic_Blue_Red_12"),paletteer_d("ggthemes::Classic_Purple_Gray_12")),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.Classic_Green_Orange.color.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c("#fcff5d","#7dfc00","#0ec434","#228c68","#8ad8e8","#235b54","#29bdab","#3998f5","#37294f","#277da7","#3750db","#f22020","#991919","#ffcba5","#e68f66","#c56133","#96341c","#632819","#ffc413","#f47a22","#2f2aa0","#b732cc","#772b9d","#f07cab","#d30b94","#edeff3","#c3a5b4","#946aa2","#5d4C316"),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.0.6.artist.color.pdf", width = 10, height = 8)
+
+# Plot UMAP for resolution 1.0.
+Idents(filtered.pacemaker.samples) <- "SCT_snn_res.1"
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = c(paletteer_d("ggthemes::Tableau_20"), rev(paletteer_d("ggthemes::Miller_Stone")), paletteer_d("ggthemes::Summer")),
+        label.size = 6)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.1.Tableau_20.color.pdf", width = 10, height = 8)
+```
+Decision: Use resolution 1.0.
+
+Segregation of clusters by sample
+```{r}
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(filtered.pacemaker.samples, 
+                     vars = c("ident", "orig.ident")) %>%
+        dplyr::count(ident, orig.ident) %>%
+        tidyr::spread(ident, n)
+
+write.table(n_cells,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/N_Cells_For_Each_Clusters.txt", quote = F, sep = "\t", row.names = F)
+
+# UMAP of cells in each cluster by sample
+DimPlot(filtered.pacemaker.samples, 
+        label = TRUE, 
+        split.by = "orig.ident")  + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/SplitSamples.UMAP.res.0.6.pdf", width = 40, height = 5)
+
+DimPlot(filtered.pacemaker.samples, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        #cols = DiscretePalette(12, palette = "stepped")[c(1,5,9,3,7,11,4,8,12)],
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/MergedSamples.UMAP.res.0.6.pdf", width = 10, height = 8)
+
+DimPlot(filtered.pacemaker.samples, 
+        label = TRUE, 
+        #cols = DiscretePalette(11, palette = "stepped")[c(1,5,9,2,6,10,3,7,11)],
+        cols = c(brewer.pal(12,"Paired"),brewer.pal(12,"Set3")[12]),
+        repel = TRUE,
+        group.by = "orig.ident")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/MergedSamples.UMAP.res.0.6.diff.colors.pdf", width = 10, height = 8)
+
+# UMAP of cells in each cluster by timepoint
+filtered.pacemaker.samples@meta.data <- mutate(filtered.pacemaker.samples@meta.data, 
+                                               Timepoint = case_when(str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D3_r") ~ "Day3", 
+                                                                     str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D4_r") ~ "Day4", 
+                                                                     str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D6_r") ~ "Day6",
+                                                                     str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D10_r") ~ "Day10",
+                                                                     str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D23_r") ~ "Day23",
+                                                                     str_detect(as.vector(filtered.pacemaker.samples@meta.data$orig.ident), "D34_r") ~ "Day34"))
+filtered.pacemaker.samples$Timepoint <- factor(filtered.pacemaker.samples$Timepoint, levels = unique(filtered.pacemaker.samples$Timepoint))
+DimPlot(filtered.pacemaker.samples, 
+        label = TRUE, 
+        split.by = "Timepoint",
+        group.by = "Timepoint")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Split.Timepoints.UMAP.res.0.6.pdf", width = 30, height = 5)
+
+DimPlot(filtered.pacemaker.samples, 
+        label = TRUE, 
+        #cols = brewer.pal(6,"Dark2"),
+        group.by = "Timepoint")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Merged.Timepoints.UMAP.res.0.6.pdf", width = 10, height = 8)
+
+```
+
+Segregation of clusters by cell cycle phase
+```{r}
+# Explore whether clusters segregate by cell cycle phase
+DimPlot(filtered.pacemaker.samples,
+        group.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Merged.CellCycle.UMAP.res.0.6.pdf", width = 10, height = 8)
+DimPlot(filtered.pacemaker.samples,
+        group.by = "Phase",
+        split.by = "Phase")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Split.CellCycle.UMAP.res.0.6.pdf", width = 25, height = 10)
+```
+
+Segregation of clusters by multiplet class.
+```{r}
+# Explore whether clusters segregate by singlet vs doublet.
+DimPlot(filtered.pacemaker.samples,
+        group.by = "multiplet_class")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Merged.Multiplet.UMAP.res.0.6.pdf", width = 10, height = 8)
+DimPlot(filtered.pacemaker.samples,
+        group.by = "multiplet_class",
+        split.by = "multiplet_class")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Split.Multiplet.UMAP.res.0.6.pdf", width = 10, height = 5)
+```
+
+Segregation of clusters by various sources of uninteresting variation
+```{r}
+# Determine metrics to plot present in seurat_integrated@meta.data
+metrics <-  c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "percent.mt")
+
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = metrics,
+            pt.size = 0.4, 
+            order = TRUE,
+            #min.cutoff = 'q10',
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Metrics.UMAP.res.0.6.pdf", width = 10, height = 10)
+```
+
+Exploring known cell type markers
+```{r}
+# Pan-Cardiac genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("NKX2-5", "TNNT2", "MYH6", "MYH7"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Pan_Cardiac_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+# Violin plot
+VlnPlot(filtered.pacemaker.samples, c("NKX2-5", "TNNT2", "MYH6", "MYH7"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 4)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Pan_Cardiac_Genes.Violin.UMAP.res.0.6.pdf", width = 16, height = 5)
+
+# Pacemaker cell genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("TBX18", "SHOX2", "ISL1", "TBX3"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/PacemakerCell_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+# Violin plot
+VlnPlot(filtered.pacemaker.samples, c("TBX18", "SHOX2", "ISL1", "TBX3"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 4)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/PacemakerCell_Genes.Violin.UMAP.res.0.6.pdf", width = 16, height = 5)
+
+# Ion channel and connexin genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("HCN4", "KCNJ3", "GJD3"), 
+            order = FALSE,
+            #min.cutoff = 'q10', 
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/IonChannel_Connexin_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.pacemaker.samples, c("HCN4", "KCNJ3", "GJD3"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/IonChannel_Connexin_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# Ventricular genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("MYL2", "HEY2", "IRX4"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "orange"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Ventricular_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.pacemaker.samples, c("MYL2", "HEY2", "IRX4"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Ventricular_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# Atrial genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("MYL7", "NPPA", "NR2F2"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "darkgreen"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Atrial_Genes.UMAP.res.0.6.pdf", width = 12, height = 10)
+
+VlnPlot(filtered.pacemaker.samples, c("MYL7", "NPPA", "NR2F2"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 3)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Atrial_Genes.Violin.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+# AV nodal genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("MSX2", "TBX2"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "purple"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/AV_Nodal_Genes.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+VlnPlot(filtered.pacemaker.samples, c("MSX2", "TBX2"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 2)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/AV_Nodal.Violin.UMAP.res.0.6.pdf", width = 8, height = 5)
+
+# Cardiac mesoderm genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("EOMES", "MESP1", "MESP2"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "purple"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Cardiac_Mesoderm.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+VlnPlot(filtered.pacemaker.samples, c("EOMES", "MESP1", "MESP2"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 2)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Cardiac_Mesoderm.Violin.UMAP.res.0.6.pdf", width = 8, height = 5)
+
+# Cardiac endoderm genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("FOXA2", "SOX17"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "purple"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Cardiac_Endoderm.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+VlnPlot(filtered.pacemaker.samples, c("FOXA2", "SOX17"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 2)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Cardiac_Endoderm.Violin.UMAP.res.0.6.pdf", width = 8, height = 5)
+
+# Posterior cardiac progenitors genes
+FeaturePlot(filtered.pacemaker.samples, 
+            reduction = "umap", 
+            features = c("HOXA1", "NR2F2", "TBX5"), 
+            order = FALSE,
+            #min.cutoff = 'q10',
+            cols = c("lightgrey", "purple"),
+            label = TRUE)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Posterior_cardiac_progenitors.UMAP.res.0.6.pdf", width = 12, height = 5)
+
+VlnPlot(filtered.pacemaker.samples, c("HOXA1", "NR2F2", "TBX5"), group.by = "Timepoint", pt.size = 0, cols = brewer.pal(12,"Paired")[c(2,4,6,8,10,12)], ncol = 2)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Posterior_cardiac_progenitors.Violin.UMAP.res.0.6.pdf", width = 8, height = 5)
+```
+
+```{r}
+DotPlot(filtered.pacemaker.samples, features = rev(c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2")), cols= "Spectral", group.by = "Timepoint") + RotatedAxis() + coord_flip()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/James_Markers_DotPlot.UMAP.res.0.6.pdf", width = 8, height = 6)
+```
+
+```{r}
+# Single cell heatmap of feature expression
+DoHeatmap(filtered.pacemaker.samples, features = c("NKX2-5", "TNNT2", "MYH6", "MYH7","TBX18", "SHOX2", "ISL1", "TBX3", "HCN4", "KCNJ3", "GJD3", "MYL2", "HEY2", "IRX4", "MYL7", "NPPA", "NR2F2", "MSX2", "TBX2"), size = 3, group.by = "Timepoint")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/James_Markers_Heatmap.UMAP.res.0.6.pdf")
+```
+
+
+```{r}
+# Save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+saveRDS(filtered.pacemaker.samples, file = "/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Clustered.filtered.pacemaker.samples.rds")
+
+#filtered.pacemaker.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Clustered.filtered.pacemaker.samples.rds")
+```
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+filtered.pacemaker.samples.markers <- FindAllMarkers(filtered.pacemaker.samples, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(filtered.pacemaker.samples.markers, file="/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers.RData")
+
+write.table(as.data.frame(filtered.pacemaker.samples.markers),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers.txt", quote = F, sep = "\t")
+
+table(filtered.pacemaker.samples.markers$cluster)
+
+#   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15 
+#1321  860  671 1217 1287  566 1544 1140 1563  880  693 1409 1687 1481 1383 1302 
+#  16   17   18   19   20   21   22   23   24   25   26   27 
+# 896 1355 1287  624 1201  874 1457  703  934 1771 1193 1035 
+
+#pbmc.markers %>%
+#    group_by(cluster) %>%
+#    slice_max(n = 2, order_by = avg_log2FC)
+
+dim(filtered.pacemaker.samples.markers)
+#[1] 32334     7
+
+filtered.pacemaker.samples.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC) -> top5
+DoHeatmap(filtered.pacemaker.samples, features = unique(top5$gene)) + NoLegend()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Top5.markers_heatmap.pdf")
+
+
+#DotPlot(filtered.samples, features = filtered.samples.markers$gene) + RotatedAxis()
+#levels(filtered.pacemaker.samples$SCT_snn_res.0.6) = c(18,6,8,3,15,13,21,12,5,2,10,9,16,26,27,19,20,1,24,23,25,17,22,14,4,7,11,0)
+#levels(Idents(filtered.pacemaker.samples)) = c(18,6,8,3,15,13,21,12,5,2,10,9,16,26,27,19,20,1,24,23,25,17,22,14,4,7,11,0)
+
+#filtered.pacemaker.samples$SCT_snn_res.0.6 = as.vector(filtered.pacemaker.samples$SCT_snn_res.0.6)
+
+levels(Idents(filtered.pacemaker.samples)) = seq(0,27,1)
+DotPlot(filtered.pacemaker.samples, features = unique(top5$gene), cols= "Spectral", group.by = "SCT_snn_res.0.6", idents = NULL) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+DotPlot(filtered.pacemaker.samples, features = unique(top5$gene), cols= "Spectral", cluster.idents = TRUE) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Top5.markers_dotplot.pdf", width = 25, height = 9)
+
+filtered.pacemaker.samples.markers.fdr <- filter(filtered.pacemaker.samples.markers, p_val_adj < 0.01)
+dim(filtered.pacemaker.samples.markers.fdr)
+#[1] 31936     7
+
+filtered.pacemaker.samples.markers.fdr %>%
+    group_by(cluster) %>%
+    top_n(n = 100, wt = avg_log2FC) -> top100
+
+write.table(as.data.frame(top100),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_top100.txt", quote = F, sep = "\t")
+
+#filtered.pacemaker.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.pacemaker.samples.markers.fdr$cluster))
+top100list <- matrix(0, nrow = 100, ncol = 28)
+top100_df <- as.data.frame(top100)
+for(i in seq(0,27,1)){
+  j <- i+1
+  top100list[,j] <- top100_df[top100_df$cluster == i,7]
+}
+colnames(top100list) <- paste0("C_", seq(0,27,1))
+
+top100list <- select(as.data.frame(top100list), c("C_18","C_6","C_8","C_3","C_15","C_13","C_21","C_12","C_5","C_2","C_10","C_9","C_16","C_26","C_27","C_19","C_20","C_1","C_24","C_23","C_25","C_17","C_22","C_14","C_4","C_7","C_11","C_0"))
+
+write.table(as.data.frame(top100list),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_top100list.txt", quote = F, sep = "\t", row.names = F)
+
+```
+
+Differential expression testing for SCT_snn_res.1
+```{r}
+Idents(object = filtered.pacemaker.samples) <- "SCT_snn_res.1"
+DimPlot(filtered.pacemaker.samples,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/UMAP.res.1.0.pdf", width = 10, height = 8)
+
+table(filtered.pacemaker.samples$SCT_snn_res.1)
+#   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15 
+#9120 5592 5514 5219 5141 4728 3809 3693 3391 3364 3220 3187 3152 3015 2964 2787 
+#  16   17   18   19   20   21   22   23   24   25   26   27   28   29   30   31 
+#2684 2616 2611 2410 2284 2257 2230 2222 2117 1849 1801 1791 1735 1660 1247 1147 
+#  32   33   34   35   36 
+# 647  427  421  248  196
+
+D23.D34.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "2" | SCT_snn_res.1 == "0"  | SCT_snn_res.1 == "26" | SCT_snn_res.1 == "27" | SCT_snn_res.1 == "28" | SCT_snn_res.1 == "13" | SCT_snn_res.1 == "32" | SCT_snn_res.1 == "4" | SCT_snn_res.1 == "34" | SCT_snn_res.1 == "29" | SCT_snn_res.1 == "15" | SCT_snn_res.1 == "20")
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggthemes::Green_Orange_Teal"),
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.Green_Orange_Teal.pdf", width = 10, height = 8)
+
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggthemes::Red_Blue_Brown"),
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.Red_Blue_Brown.pdf", width = 10, height = 8)
+
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggthemes::Classic_Green_Orange_12"),
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.Classic_Green_Orange.pdf", width = 10, height = 8)
+
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggthemes::stata_s2color"),
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.stata_s2color.pdf", width = 10, height = 8)
+
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("ggthemes::stata_economist")[2:15],
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.stata_economist.pdf", width = 10, height = 8)
+
+DimPlot(D23.D34.cells,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        cols = paletteer_d("tidyquant::tq_light"),
+        label.size = 5)
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/D23.D34.UMAP.res.1.0.tq_light.pdf", width = 10, height = 8)
+
+C0_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "0", ident.2 = "4", min.pct = 0.25)
+write.table(C0_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C0_vs_C4_Ressubset.txt", quote = F, sep = "\t", row.names = T)
+dim(C0_vs_C4)
+#[1] 3207    5
+#write.table(filter(C0_vs_C4, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C0_vs_C4_fdr0.05_log2fc0.5_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+
+write.table(filter(C0_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C0_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+#C0_vs_C4 <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C0_vs_C4_Res1.0.txt", sep = "\t", header = T)
+# Plot volcano plot for C0_vs_C4
+C0_vs_C4_Filter <- filter(C0_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05)
+C0_vs_C4_Filter <- mutate(C0_vs_C4_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C0_vs_C4_Filter$UpOrDown)
+#Down   Up 
+# 264  187
+C0_vs_C4_Filter <- arrange(C0_vs_C4_Filter, avg_log2FC)
+# Set the genes with FDR=0 to the smallest FDR >0 for plotting purpose.
+C0_vs_C4_Filter$p_val_adj[C0_vs_C4_Filter$p_val_adj==0] = min(C0_vs_C4_Filter$p_val_adj[C0_vs_C4_Filter$p_val_adj!=0])
+C0_vs_C4_Filter <- mutate(C0_vs_C4_Filter, Gene = rownames(C0_vs_C4_Filter))
+rownames(slice_max(C0_vs_C4_Filter, avg_log2FC, n = 25))
+rownames(slice_min(C0_vs_C4_Filter, avg_log2FC, n = 25))
+label <- rbind(slice_max(C0_vs_C4_Filter, avg_log2FC, n = 25), slice_min(C0_vs_C4_Filter, avg_log2FC, n =25))
+label <- mutate(label, Gene = rownames(label))
+ggplot(C0_vs_C4_Filter, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+      geom_point(aes(color = UpOrDown), alpha = 0.8, size = 2) +
+      scale_color_manual(values = brewer.pal(4, "Set1")[3:4] ) +
+      #xlim(-2.6,2.6) +
+      #ylim(0,35) +
+      xlab("log2FC(C0/C4)") +
+      ylab("-log10(FDR)") +
+      theme_bw() + 
+      #geom_vline(xintercept = c(-log2(1.5), log2(1.5)), lty = 2) +
+      #geom_hline(yintercept = -log10(0.05), lty = 2) +
+      #theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank(), panel.border = element_blank(), axis.line = element_line(colour = "black")) +
+      ylim(2,310) +
+      theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank()) +
+      #theme_bw(base_size = 12) + 
+      theme(legend.position = "bottom", legend.title=element_blank(), axis.text = element_text(size = 14, color = "black"), axis.title = element_text(size = 14, color = "black"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DEGs_C0_vs_C4_Res1.0.pdf", width = 6, height = 6)
+
+C0.C4.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "0" | SCT_snn_res.1 == "4")
+DotPlot(C0.C4.cells, features = label$Gene) + RotatedAxis() + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C0_vs_C4_2_Res1.0.pdf", width = 16, height = 2)
+
+DotPlot(C0.C4.cells, features = label$Gene) + RotatedAxis()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C0_vs_C4_3_Res1.0.pdf", width = 16, height = 7)
+
+DotPlot(C0.C4.cells, features = label$Gene, cols = c("#009593", "#D35C79")) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C0_vs_C4_4_Res1.0.pdf", width = 16, height = 7)
+
+# Plot top 10 pathways
+pathways <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C0_vs_C4_Metascape_Res1.0.txt", sep = "\t", quote = "", header = T, comment.char = "", check.names = F)
+## Plot FDR values rather than p-values for GO terms.
+pathways_fdr <- as.data.frame(apply(pathways[1:2], 2, function(x){log10(p.adjust(10^x))}))
+pathways_fdr <- mutate(pathways_fdr, Category = pathways$Category, Description = pathways$Description)
+GO_fdr <- filter(pathways_fdr, Category == "GO Biological Processes")
+GO_Up_fdr <- GO_fdr %>% arrange(Up) %>% head(n=10)
+GO_Down_fdr <- GO_fdr %>% arrange(Down) %>% head(n=10)
+Up_Down_top10_fdr <- GO_fdr %>% filter(Description %in% unique(c(GO_Up_fdr$Description, GO_Down_fdr$Description))) %>% select(-Category) %>% arrange(desc(Down))
+Up_Down_top10_long_fdr <- melt(Up_Down_top10_fdr)
+Up_Down_top10_long_fdr$variable <- factor(Up_Down_top10_long_fdr$variable, levels = c("Up","Down"))
+Up_Down_top10_long_fdr$Description <- factor(Up_Down_top10_long_fdr$Description, levels = unique(Up_Down_top10_fdr$Description))
+ggplot(Up_Down_top10_long_fdr,aes(x=variable, y=Description)) + geom_point(aes(size=-value), colour = "#6BA3D6") + xlab("DEG Sets") + ylab("GO Pathways") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 9))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C0_vs_C4_Up_Down_Top_10_Pathways_fdr_Res1.0.pdf", width = 4.5, height = 5)
+
+
+C27_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "27", ident.2 = "4", min.pct = 0.25)
+write.table(C27_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C27_vs_C4_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+dim(C27_vs_C4)
+# [1] 2023    5
+write.table(filter(C27_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C27_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+# Plot volcano plot for C27_vs_C4
+C27_vs_C4_Filter <- filter(C27_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05)
+C27_vs_C4_Filter <- mutate(C27_vs_C4_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C27_vs_C4_Filter$UpOrDown)
+#Down   Up 
+#  55   94 
+C27_vs_C4_Filter <- arrange(C27_vs_C4_Filter, avg_log2FC)
+# Set the genes with FDR=0 to the smallest FDR >0 for plotting purpose.
+C27_vs_C4_Filter$p_val_adj[C27_vs_C4_Filter$p_val_adj==0] = min(C27_vs_C4_Filter$p_val_adj[C27_vs_C4_Filter$p_val_adj!=0])
+C27_vs_C4_Filter <- mutate(C27_vs_C4_Filter, Gene = rownames(C27_vs_C4_Filter))
+rownames(slice_max(C27_vs_C4_Filter, avg_log2FC, n = 25))
+rownames(slice_min(C27_vs_C4_Filter, avg_log2FC, n = 25))
+label <- rbind(slice_max(C27_vs_C4_Filter, avg_log2FC, n = 25), slice_min(C27_vs_C4_Filter, avg_log2FC, n =25))
+label <- mutate(label, Gene = rownames(label))
+ggplot(C27_vs_C4_Filter, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+      geom_point(aes(color = UpOrDown), alpha = 0.8, size = 2) +
+      scale_color_manual(values = brewer.pal(4, "Set1")[3:4] ) +
+      #xlim(-2.6,2.6) +
+      #ylim(0,35) +
+      xlab("log2FC(C27/C4)") +
+      ylab("-log10(FDR)") +
+      theme_bw() + 
+      #geom_vline(xintercept = c(-log2(1.5), log2(1.5)), lty = 2) +
+      #geom_hline(yintercept = -log10(0.05), lty = 2) +
+      #theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank(), panel.border = element_blank(), axis.line = element_line(colour = "black")) +
+      ylim(2,310) +
+      theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank()) +
+      #theme_bw(base_size = 12) + 
+      theme(legend.position = "bottom", legend.title=element_blank(), axis.text = element_text(size = 14, color = "black"), axis.title = element_text(size = 14, color = "black"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DEGs_C27_vs_C4_Res1.0.pdf", width = 6, height = 6)
+
+C27.C4.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "27" | SCT_snn_res.1 == "4")
+DotPlot(C27.C4.cells, features = label$Gene) + RotatedAxis() + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C27_vs_C4_2_Res1.0.pdf", width = 16, height = 2)
+
+DotPlot(C27.C4.cells, features = label$Gene) + RotatedAxis()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C27_vs_C4_3_Res1.0.pdf", width = 16, height = 7)
+
+# Plot top 10 pathways
+pathways <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C27_vs_C4_Metascape_Res1.0.txt", sep = "\t", quote = "", header = T, comment.char = "", check.names = F)
+## Plot FDR values rather than p-values for GO terms.
+pathways_fdr <- as.data.frame(apply(pathways[1:2], 2, function(x){log10(p.adjust(10^x))}))
+pathways_fdr <- mutate(pathways_fdr, Category = pathways$Category, Description = pathways$Description)
+GO_fdr <- filter(pathways_fdr, Category == "GO Biological Processes")
+GO_Up_fdr <- GO_fdr %>% arrange(Up) %>% head(n=10)
+GO_Down_fdr <- GO_fdr %>% arrange(Down) %>% head(n=10)
+Up_Down_top10_fdr <- GO_fdr %>% filter(Description %in% unique(c(GO_Up_fdr$Description, GO_Down_fdr$Description))) %>% select(-Category) %>% arrange(desc(Down))
+Up_Down_top10_long_fdr <- melt(Up_Down_top10_fdr)
+Up_Down_top10_long_fdr$variable <- factor(Up_Down_top10_long_fdr$variable, levels = c("Up","Down"))
+Up_Down_top10_long_fdr$Description <- factor(Up_Down_top10_long_fdr$Description, levels = unique(Up_Down_top10_fdr$Description))
+ggplot(Up_Down_top10_long_fdr,aes(x=variable, y=Description)) + geom_point(aes(size=-value), colour = "#6BA3D6") + xlab("DEG Sets") + ylab("GO Pathways") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 9))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C27_vs_C4_Up_Down_Top_10_Pathways_fdr_Res1.0.pdf", width = 4.5, height = 5)
+
+
+C2_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "2", ident.2 = "4", min.pct = 0.25)
+write.table(C2_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C2_vs_C4_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+dim(C2_vs_C4)
+# [1] 3734    5
+write.table(filter(C2_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C2_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+# Plot volcano plot for C2_vs_C4
+C2_vs_C4_Filter <- filter(C2_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05)
+C2_vs_C4_Filter <- mutate(C2_vs_C4_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C2_vs_C4_Filter$UpOrDown)
+#Down   Up 
+# 367  218 
+C2_vs_C4_Filter <- arrange(C2_vs_C4_Filter, avg_log2FC)
+# Set the genes with FDR=0 to the smallest FDR >0 for plotting purpose.
+C2_vs_C4_Filter$p_val_adj[C2_vs_C4_Filter$p_val_adj==0] = min(C2_vs_C4_Filter$p_val_adj[C2_vs_C4_Filter$p_val_adj!=0])
+C2_vs_C4_Filter <- mutate(C2_vs_C4_Filter, Gene = rownames(C2_vs_C4_Filter))
+rownames(slice_max(C2_vs_C4_Filter, avg_log2FC, n = 25))
+rownames(slice_min(C2_vs_C4_Filter, avg_log2FC, n = 25))
+label <- rbind(slice_max(C2_vs_C4_Filter, avg_log2FC, n = 25), slice_min(C2_vs_C4_Filter, avg_log2FC, n =25))
+label <- mutate(label, Gene = rownames(label))
+ggplot(C2_vs_C4_Filter, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+      geom_point(aes(color = UpOrDown), alpha = 0.8, size = 2) +
+      scale_color_manual(values = brewer.pal(4, "Set1")[3:4] ) +
+      #xlim(-2.6,2.6) +
+      #ylim(0,35) +
+      xlab("log2FC(C2/C4)") +
+      ylab("-log10(FDR)") +
+      theme_bw() + 
+      #geom_vline(xintercept = c(-log2(1.5), log2(1.5)), lty = 2) +
+      #geom_hline(yintercept = -log10(0.05), lty = 2) +
+      #theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank(), panel.border = element_blank(), axis.line = element_line(colour = "black")) +
+      ylim(26,255) +
+      theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank()) +
+      #theme_bw(base_size = 12) + 
+      theme(legend.position = "bottom", legend.title=element_blank(), axis.text = element_text(size = 14, color = "black"), axis.title = element_text(size = 14, color = "black"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DEGs_C2_vs_C4_Res1.0.pdf", width = 6, height = 6)
+
+C2.C4.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "2" | SCT_snn_res.1 == "4")
+DotPlot(C2.C4.cells, features = label$Gene) + RotatedAxis() + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C2_vs_C4_2_Res1.0.pdf", width = 16, height = 2)
+
+DotPlot(C2.C4.cells, features = label$Gene) + RotatedAxis()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C2_vs_C4_3_Res1.0.pdf", width = 16, height = 7)
+
+DotPlot(C2.C4.cells, features = label$Gene, cols = c("#009593", "#D35C79")) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C2_vs_C4_4_Res1.0.pdf", width = 16, height = 7)
+
+# Plot top 10 pathways
+pathways <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C2_vs_C4_Metascape_Res1.0.txt", sep = "\t", quote = "", header = T, comment.char = "", check.names = F)
+## Plot FDR values rather than p-values for GO terms.
+pathways_fdr <- as.data.frame(apply(pathways[1:2], 2, function(x){log10(p.adjust(10^x))}))
+pathways_fdr <- mutate(pathways_fdr, Category = pathways$Category, Description = pathways$Description)
+GO_fdr <- filter(pathways_fdr, Category == "GO Biological Processes")
+GO_Up_fdr <- GO_fdr %>% arrange(Up) %>% head(n=10)
+GO_Down_fdr <- GO_fdr %>% arrange(Down) %>% head(n=10)
+Up_Down_top10_fdr <- GO_fdr %>% filter(Description %in% unique(c(GO_Up_fdr$Description, GO_Down_fdr$Description))) %>% select(-Category) %>% arrange(desc(Down))
+Up_Down_top10_long_fdr <- melt(Up_Down_top10_fdr)
+Up_Down_top10_long_fdr$variable <- factor(Up_Down_top10_long_fdr$variable, levels = c("Up","Down"))
+Up_Down_top10_long_fdr$Description <- factor(Up_Down_top10_long_fdr$Description, levels = unique(Up_Down_top10_fdr$Description))
+ggplot(Up_Down_top10_long_fdr,aes(x=variable, y=Description)) + geom_point(aes(size=-value), colour = "#6BA3D6") + xlab("DEG Sets") + ylab("GO Pathways") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 9))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C2_vs_C4_Up_Down_Top_10_Pathways_fdr_Res1.0.pdf", width = 4.5, height = 5)
+
+
+C13_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "13", ident.2 = "4", min.pct = 0.25)
+write.table(C13_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C13_vs_C4_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+dim(C13_vs_C4)
+# [1] 1740    5
+write.table(filter(C13_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C13_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+# Plot volcano plot for C13_vs_C4
+C13_vs_C4_Filter <- filter(C13_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05)
+C13_vs_C4_Filter <- mutate(C13_vs_C4_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C13_vs_C4_Filter$UpOrDown)
+#Down   Up 
+#  43   76 
+C13_vs_C4_Filter <- arrange(C13_vs_C4_Filter, avg_log2FC)
+# Set the genes with FDR=0 to the smallest FDR >0 for plotting purpose.
+C13_vs_C4_Filter$p_val_adj[C13_vs_C4_Filter$p_val_adj==0] = min(C13_vs_C4_Filter$p_val_adj[C13_vs_C4_Filter$p_val_adj!=0])
+C13_vs_C4_Filter <- mutate(C13_vs_C4_Filter, Gene = rownames(C13_vs_C4_Filter))
+rownames(slice_max(C13_vs_C4_Filter, avg_log2FC, n = 25))
+rownames(slice_min(C13_vs_C4_Filter, avg_log2FC, n = 25))
+label <- rbind(slice_max(C13_vs_C4_Filter, avg_log2FC, n = 25), slice_min(C13_vs_C4_Filter, avg_log2FC, n =25))
+label <- mutate(label, Gene = rownames(label))
+ggplot(C13_vs_C4_Filter, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+      geom_point(aes(color = UpOrDown), alpha = 0.8, size = 2) +
+      scale_color_manual(values = brewer.pal(4, "Set1")[3:4] ) +
+      #xlim(-2.6,2.6) +
+      #ylim(0,35) +
+      xlab("log2FC(C13/C4)") +
+      ylab("-log10(FDR)") +
+      theme_bw() + 
+      #geom_vline(xintercept = c(-log2(1.5), log2(1.5)), lty = 2) +
+      #geom_hline(yintercept = -log10(0.05), lty = 2) +
+      #theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank(), panel.border = element_blank(), axis.line = element_line(colour = "black")) +
+      ylim(20,300) +
+      theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank()) +
+      #theme_bw(base_size = 12) + 
+      theme(legend.position = "bottom", legend.title=element_blank(), axis.text = element_text(size = 14, color = "black"), axis.title = element_text(size = 14, color = "black"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DEGs_C13_vs_C4_Res1.0.pdf", width = 6, height = 6)
+
+C13.C4.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "13" | SCT_snn_res.1 == "4")
+DotPlot(C13.C4.cells, features = label$Gene) + RotatedAxis() + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C13_vs_C4_2_Res1.0.pdf", width = 16, height = 2)
+
+DotPlot(C13.C4.cells, features = label$Gene) + RotatedAxis()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C13_vs_C4_3_Res1.0.pdf", width = 16, height = 7)
+
+# Plot top 10 pathways
+pathways <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C13_vs_C4_Metascape_Res1.0.txt", sep = "\t", quote = "", header = T, comment.char = "", check.names = F)
+## Plot FDR values rather than p-values for GO terms.
+pathways_fdr <- as.data.frame(apply(pathways[1:2], 2, function(x){log10(p.adjust(10^x))}))
+pathways_fdr <- mutate(pathways_fdr, Category = pathways$Category, Description = pathways$Description)
+GO_fdr <- filter(pathways_fdr, Category == "GO Biological Processes")
+GO_Up_fdr <- GO_fdr %>% arrange(Up) %>% head(n=10)
+GO_Down_fdr <- GO_fdr %>% arrange(Down) %>% head(n=10)
+Up_Down_top10_fdr <- GO_fdr %>% filter(Description %in% unique(c(GO_Up_fdr$Description, GO_Down_fdr$Description))) %>% select(-Category) %>% arrange(desc(Down))
+Up_Down_top10_long_fdr <- melt(Up_Down_top10_fdr)
+Up_Down_top10_long_fdr$variable <- factor(Up_Down_top10_long_fdr$variable, levels = c("Up","Down"))
+Up_Down_top10_long_fdr$Description <- factor(Up_Down_top10_long_fdr$Description, levels = unique(Up_Down_top10_fdr$Description))
+ggplot(Up_Down_top10_long_fdr,aes(x=variable, y=Description)) + geom_point(aes(size=-value), colour = "#6BA3D6") + xlab("DEG Sets") + ylab("GO Pathways") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 9))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C13_vs_C4_Up_Down_Top_10_Pathways_fdr_Res1.0.pdf", width = 4, height = 5)
+
+
+C28_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "28", ident.2 = "4", min.pct = 0.25)
+write.table(C28_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C28_vs_C4_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+dim(C28_vs_C4)
+# [1] 2082    5
+write.table(filter(C28_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C28_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+# Plot volcano plot for C28_vs_C4
+C28_vs_C4_Filter <- filter(C28_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05)
+C28_vs_C4_Filter <- mutate(C28_vs_C4_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C28_vs_C4_Filter$UpOrDown)
+#Down   Up 
+# 127   72 
+C28_vs_C4_Filter <- arrange(C28_vs_C4_Filter, avg_log2FC)
+# Set the genes with FDR=0 to the smallest FDR >0 for plotting purpose.
+C28_vs_C4_Filter$p_val_adj[C28_vs_C4_Filter$p_val_adj==0] = min(C28_vs_C4_Filter$p_val_adj[C28_vs_C4_Filter$p_val_adj!=0])
+C28_vs_C4_Filter <- mutate(C28_vs_C4_Filter, Gene = rownames(C28_vs_C4_Filter))
+rownames(slice_max(C28_vs_C4_Filter, avg_log2FC, n = 25))
+rownames(slice_min(C28_vs_C4_Filter, avg_log2FC, n = 25))
+label <- rbind(slice_max(C28_vs_C4_Filter, avg_log2FC, n = 25), slice_min(C28_vs_C4_Filter, avg_log2FC, n =25))
+label <- mutate(label, Gene = rownames(label))
+ggplot(C28_vs_C4_Filter, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+      geom_point(aes(color = UpOrDown), alpha = 0.8, size = 2) +
+      scale_color_manual(values = brewer.pal(4, "Set1")[3:4] ) +
+      #xlim(-2.6,2.6) +
+      #ylim(0,35) +
+      xlab("log2FC(C28/C4)") +
+      ylab("-log10(FDR)") +
+      theme_bw() + 
+      #geom_vline(xintercept = c(-log2(1.5), log2(1.5)), lty = 2) +
+      #geom_hline(yintercept = -log10(0.05), lty = 2) +
+      #theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank(), panel.border = element_blank(), axis.line = element_line(colour = "black")) +
+      ylim(30,310) +
+      theme(panel.grid.minor =  element_blank(), panel.grid.major = element_blank()) +
+      #theme_bw(base_size = 12) + 
+      theme(legend.position = "bottom", legend.title=element_blank(), axis.text = element_text(size = 14, color = "black"), axis.title = element_text(size = 14, color = "black"))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DEGs_C28_vs_C4_Res1.0.pdf", width = 6, height = 6)
+
+C28.C4.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "28" | SCT_snn_res.1 == "4")
+DotPlot(C28.C4.cells, features = label$Gene) + RotatedAxis() + ylab("Clusters")
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C28_vs_C4_2_Res1.0.pdf", width = 16, height = 2)
+
+DotPlot(C28.C4.cells, features = label$Gene) + RotatedAxis()
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Top_50_DEGs_C28_vs_C4_3_Res1.0.pdf", width = 16, height = 7)
+
+# Plot top 10 pathways
+pathways <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C28_vs_C4_Metascape_Res1.0.txt", sep = "\t", quote = "", header = T, comment.char = "", check.names = F)
+## Plot FDR values rather than p-values for GO terms.
+pathways_fdr <- as.data.frame(apply(pathways[1:2], 2, function(x){log10(p.adjust(10^x))}))
+pathways_fdr <- mutate(pathways_fdr, Category = pathways$Category, Description = pathways$Description)
+GO_fdr <- filter(pathways_fdr, Category == "GO Biological Processes")
+GO_Up_fdr <- GO_fdr %>% arrange(Up) %>% head(n=10)
+GO_Down_fdr <- GO_fdr %>% arrange(Down) %>% head(n=10)
+Up_Down_top10_fdr <- GO_fdr %>% filter(Description %in% unique(c(GO_Up_fdr$Description, GO_Down_fdr$Description))) %>% select(-Category) %>% arrange(desc(Down))
+Up_Down_top10_long_fdr <- melt(Up_Down_top10_fdr)
+Up_Down_top10_long_fdr$variable <- factor(Up_Down_top10_long_fdr$variable, levels = c("Up","Down"))
+Up_Down_top10_long_fdr$Description <- factor(Up_Down_top10_long_fdr$Description, levels = unique(Up_Down_top10_fdr$Description))
+ggplot(Up_Down_top10_long_fdr,aes(x=variable, y=Description)) + geom_point(aes(size=-value), colour = "#6BA3D6") + xlab("DEG Sets") + ylab("GO Pathways") + labs(size="-LogFDR") + theme(axis.text=  element_text(color = "black"), axis.title =  element_text(size = 9))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/C28_vs_C4_Up_Down_Top_10_Pathways_fdr_Res1.0.pdf", width = 4.5, height = 5)
+
+
+C26_vs_C4 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "26", ident.2 = "4", min.pct = 0.25)
+write.table(C26_vs_C4,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C26_vs_C4_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+dim(C26_vs_C4)
+# [1] 4086    5
+write.table(filter(C26_vs_C4, abs(avg_log2FC) > 1 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C26_vs_C4_fdr0.05_log2fc1_Res1.0.txt", quote = F, sep = "\t", row.names = T)
+```
+
+
+```{r}
+# find markers for every cluster at resolution 1.0
+Idents(object = filtered.pacemaker.samples) <- "SCT_snn_res.1"
+filtered.pacemaker.samples.markers <- FindAllMarkers(filtered.pacemaker.samples, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+save(filtered.pacemaker.samples.markers, file="/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_Res1.0.RData")
+
+write.table(as.data.frame(filtered.pacemaker.samples.markers),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_Res1.0.txt", quote = F, sep = "\t")
+
+table(filtered.pacemaker.samples.markers$cluster)
+
+#   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15 
+# 1360  662 1169 1543 1357 1072 1557 1416  673  995  695  644  567 1250  900 1383 
+#   16   17   18   19   20   21   22   23   24   25   26   27   28   29   30   31 
+# 1510 1796 1274  890 1356 1182 1297  750  624  878 1818 1377  931 1455  700  936 
+#   32   33   34   35   36 
+# 1137 1144 1770 1193 1022 
+
+dim(filtered.pacemaker.samples.markers)
+#[1] 42283     7
+
+filtered.pacemaker.samples.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC) -> top5
+#levels(Idents(filtered.pacemaker.samples)) = seq(0,36,1)
+DotPlot(filtered.pacemaker.samples, features = unique(top5$gene), cols= "Spectral", group.by = "SCT_snn_res.1", idents = NULL) + RotatedAxis() + theme(axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/Top5.markers_dotplot_Res1.0.pdf", width = 28, height = 9)
+
+filtered.pacemaker.samples.markers.fdr <- filter(filtered.pacemaker.samples.markers, p_val_adj < 0.01)
+dim(filtered.pacemaker.samples.markers.fdr)
+#[1] 41774     7
+
+filtered.pacemaker.samples.markers.fdr %>%
+    group_by(cluster) %>%
+    top_n(n = 100, wt = avg_log2FC) -> top200
+
+write.table(as.data.frame(top200),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_top200_Res1.0.txt", quote = F, sep = "\t")
+
+#filtered.pacemaker.samples.markers.fdr$cluster = as.vector(as.numeric(filtered.pacemaker.samples.markers.fdr$cluster))
+top200list <- matrix(0, nrow = 200, ncol = 37)
+top200_df <- as.data.frame(top200)
+for(i in seq(0,36,1)){
+  j <- i+1
+  top200list[,j] <- top200_df[top200_df$cluster == i,7]
+}
+colnames(top200list) <- paste0("C_", seq(0,36,1))
+
+write.table(as.data.frame(top200list),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/UMAP/FindAllMarkers_top200list_Res1.0.txt", quote = F, sep = "\t", row.names = F)
+```
+
+
+Differential expression testing for SCT_snn_res.1
+```{r}
+#filtered.pacemaker.samples <- readRDS("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/Clustered.filtered.pacemaker.samples.rds")
+DefaultAssay(filtered.pacemaker.samples) <- "RNA"
+filtered.pacemaker.samples <- NormalizeData(filtered.pacemaker.samples, normalization.method = "LogNormalize", scale.factor = 10000)
+
+Idents(filtered.pacemaker.samples) <- "SCT_snn_res.1"
+
+cluster_col <- c(paletteer_d("ggthemes::Tableau_20"), rev(paletteer_d("ggthemes::Miller_Stone")), paletteer_d("ggthemes::Summer"))
+
+## Differential expression between C5+C31 vs. C14
+#filtered.pacemaker.samples$SCT_snn_res.1_combine = as.vector(filtered.pacemaker.samples$SCT_snn_res.1)
+#filtered.pacemaker.samples$SCT_snn_res.1_combine[filtered.pacemaker.samples$SCT_snn_res.1_combine=="5" | filtered.pacemaker.samples$SCT_snn_res.1_combine=="8"]="5_8"
+
+#Idents(filtered.pacemaker.samples) <- "SCT_snn_res.1_combine"
+########################################################################################
+###### Differential expression between C5 vs C14.
+C5_vs_C14 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "5", ident.2 = "14", min.pct = 0.25, assay = "RNA")
+write.table(C5_vs_C14,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C5_vs_C14.txt", quote = F, sep = "\t", row.names = T)
+dim(C5_vs_C14)
+#[1] 1946    5
+write.table(filter(C5_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C5_vs_C14_fdr0.05_log2fc0.5.txt", quote = F, sep = "\t", row.names = T)
+#C5_vs_C14 <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C5_vs_C14.txt", sep = "\t", header = T)
+
+C5_vs_C14_Filter <- filter(C5_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+C5_vs_C14_Filter <- mutate(C5_vs_C14_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C5_vs_C14_Filter$UpOrDown)
+#Down   Up 
+# 390  386 
+C5_vs_C14_Filter <- arrange(C5_vs_C14_Filter, avg_log2FC)
+
+label <- rbind(slice_max(C5_vs_C14_Filter, avg_log2FC, n = 25), slice_min(C5_vs_C14_Filter, avg_log2FC, n =25))
+
+C5.C14.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "5" | SCT_snn_res.1 == "14")
+
+DotPlot(C5.C14.cells, features = rownames(label), cols = c("#663000", "#00AACC")) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.Top_50_DEGs_C5_vs_C14.pdf", width = 16, height = 4) 
+
+C5_vs_C14_Filter <- filter(C5_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+#C5_vs_C14_Filter <- arrange(C5_vs_C14_Filter, desc(avg_log2FC))
+# Single cell heatmap of feature expression
+mat<- C5.C14.cells[["RNA"]]@data[rownames(C5_vs_C14_Filter),] %>% as.matrix()
+#tail.head.RNA.subset[["SCT"]]@data[unique(rownames(combine_DEGs)),]
+## scale the rows
+mat<- t(scale(t(mat)))
+cluster_anno<- C5.C14.cells@meta.data$SCT_snn_res.1
+### Annotate certain genes.
+
+ha = rowAnnotation(foo = anno_mark(at = c(2,36,44,47,48,54,88,113,121,144,173,189,249,281,284,285,313,330,375,379,432,434,440,569,591,748,768,771,774), labels = rownames(C5_vs_C14_Filter)[c(2,36,44,47,48,54,88,113,121,144,173,189,249,281,284,285,313,330,375,379,432,434,440,569,591,748,768,771,774)]))
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1_C5_vs_C14_heatmap.pdf", height = 8, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        #column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = grid::gpar(fontsize = 0),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("ACM" = "red", "VCM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c(cluster_col[6], cluster_col[15])))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(ACM_vs_VCM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c(cluster_col[6], "#F7FAFF", cluster_col[15])))
+draw(ht)
+dev.off()
+
+########################################################################################
+###### Differential expression between C8 vs C14.
+C8_vs_C14 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "8", ident.2 = "14", min.pct = 0.25, assay = "RNA")
+write.table(C8_vs_C14,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C8_vs_C14.txt", quote = F, sep = "\t", row.names = T)
+dim(C8_vs_C14)
+#[1] 1237    5
+write.table(filter(C8_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C8_vs_C14_fdr0.05_log2fc0.5.txt", quote = F, sep = "\t", row.names = T)
+#C8_vs_C14 <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C8_vs_C14.txt", sep = "\t", header = T)
+
+C8_vs_C14_Filter <- filter(C8_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+C8_vs_C14_Filter <- mutate(C8_vs_C14_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C8_vs_C14_Filter$UpOrDown)
+#Down   Up 
+# 268  119 
+C8_vs_C14_Filter <- arrange(C8_vs_C14_Filter, avg_log2FC)
+
+C8.C14.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "8" | SCT_snn_res.1 == "14")
+
+label <- rbind(slice_max(C8_vs_C14_Filter, avg_log2FC, n = 25), slice_min(C8_vs_C14_Filter, avg_log2FC, n =25))
+
+DotPlot(C8.C14.cells, features = rownames(label), cols = c("#663000", "#00AACC")) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.Top_50_DEGs_C8_vs_C14.pdf", width = 16, height = 4) 
+
+# Single cell heatmap of feature expression
+C8_vs_C14_Filter <- filter(C8_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+mat<- C8.C14.cells[["RNA"]]@data[rownames(C8_vs_C14_Filter),] %>% as.matrix()
+#tail.head.RNA.subset[["SCT"]]@data[unique(rownames(combine_DEGs)),]
+## scale the rows
+mat<- t(scale(t(mat)))
+cluster_anno<- C8.C14.cells@meta.data$SCT_snn_res.1
+### Annotate certain genes.
+row_dend = as.dendrogram(hclust(dist(mat)))
+#tmp = hclust(dist(mat))
+#tmp_rev = rev(tmp)
+ha = rowAnnotation(foo = anno_mark(at = c(10,25,27,43,51,56,72,134,136,137,160,179,198,200,218,275,292,294,313,379,382), labels = rownames(C8_vs_C14_Filter)[c(10,25,27,43,51,56,72,134,136,137,160,179,198,200,218,275,292,294,313,379,382)]))
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1_C8_vs_C14_heatmap.pdf", height = 8, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        #column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        #cluster_rows = TRUE,
+        cluster_rows = row_dend,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = grid::gpar(fontsize = 0),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("ACM" = "red", "VCM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c(cluster_col[9], cluster_col[15])))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(ACM_vs_VCM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c(cluster_col[9], "#F7FAFF", cluster_col[15])))
+draw(ht)
+dev.off()
+########################################################################################
+###### Differential expression between C31 vs C14.
+C31_vs_C14 <- FindMarkers(filtered.pacemaker.samples, ident.1 = "31", ident.2 = "14", min.pct = 0.25, assay = "RNA")
+write.table(C31_vs_C14,"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C31_vs_C14.txt", quote = F, sep = "\t", row.names = T)
+dim(C31_vs_C14)
+#[1]  1377    5
+write.table(filter(C31_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05),"/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.DE_C31_vs_C14_fdr0.05_log2fc0.5.txt", quote = F, sep = "\t", row.names = T)
+#C31_vs_C14 <- read.table("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/DE_C31_vs_C14.txt", sep = "\t", header = T)
+
+C31_vs_C14_Filter <- filter(C31_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+C31_vs_C14_Filter <- mutate(C31_vs_C14_Filter, UpOrDown = case_when(avg_log2FC < 0 ~ "Down", avg_log2FC > 0 ~ "Up"))
+table(C31_vs_C14_Filter$UpOrDown)
+#Down   Up 
+# 237  208 
+C31_vs_C14_Filter <- arrange(C31_vs_C14_Filter, avg_log2FC)
+
+C31.C14.cells <- subset(filtered.pacemaker.samples, subset = SCT_snn_res.1 == "31" | SCT_snn_res.1 == "14")
+
+label <- rbind(slice_max(C31_vs_C14_Filter, avg_log2FC, n = 25), slice_min(C31_vs_C14_Filter, avg_log2FC, n =25))
+
+DotPlot(C31.C14.cells, features = rownames(label), cols = c("#663000", "#00AACC")) + RotatedAxis() + theme(axis.text.x = element_text(angle = 90))
+ggsave("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1.Top_50_DEGs_C31_vs_C14.pdf", width = 16, height = 4) 
+
+
+# Single cell heatmap of feature expression
+C31_vs_C14_Filter <- filter(C31_vs_C14, abs(avg_log2FC) > 0.5 & p_val_adj < 0.05)
+mat<- C31.C14.cells[["RNA"]]@data[rownames(C31_vs_C14_Filter),] %>% as.matrix()
+#tail.head.RNA.subset[["SCT"]]@data[unique(rownames(combine_DEGs)),]
+## scale the rows
+mat<- t(scale(t(mat)))
+C31.C14.cells@meta.data$SCT_snn_res.1 <- factor(C31.C14.cells@meta.data$SCT_snn_res.1, levels = c("31","14"))
+cluster_anno<- C31.C14.cells@meta.data$SCT_snn_res.1
+### Annotate certain genes.
+
+ha = rowAnnotation(foo = anno_mark(at = c(7,9,12,13,19,22,23,26,27,28,43,46,52,61,92,130,181,220,385,444,445), labels = rownames(C31_vs_C14_Filter)[c(7,9,12,13,19,22,23,26,27,28,43,46,52,61,92,130,181,220,385,444,445)]))
+
+pdf("/Data/iPSC_pacemaker/Seurat/Pacemaker_Cells/Second_Round/DE/Res.1_C31_vs_C14_heatmap.pdf", height = 8, width = 10)
+ht <- Heatmap(mat, name = "Expression",  
+        column_split = factor(cluster_anno),
+        cluster_columns = FALSE,
+        show_column_dend = FALSE,
+        cluster_column_slices = TRUE,
+        #column_title_gp = gpar(fontsize = 8),
+        column_gap = unit(0, "mm"),
+        cluster_rows = TRUE,
+        show_row_dend = FALSE,
+        #col = col_fun,
+        row_names_gp = grid::gpar(fontsize = 0),
+        column_title_rot = 0,
+        #top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(7)))),
+        #HeatmapAnnotation(bar = cluster_anno, col = list(bar = c("ACM" = "red", "VCM" = "green"))),
+        top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = c(cluster_col[32], cluster_col[15])))),
+        #right_annotation = HeatmapAnnotation(foo = anno_barplot(ACM_vs_VCM_DE_order$avg_log2FC, baseline = 0)),
+        show_column_names = FALSE,
+        show_row_names = FALSE,
+        use_raster = TRUE,
+        raster_quality = 4,
+        right_annotation = ha,
+        col = colorRamp2(c(-4, 0, 4), c(cluster_col[32], "#F7FAFF", cluster_col[15])))
+draw(ht)
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

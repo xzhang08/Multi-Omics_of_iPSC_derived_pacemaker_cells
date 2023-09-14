@@ -1,0 +1,1873 @@
+---
+title: "scATAC-seq data analysis of D34 SANCMs"
+output: html_document
+---
+
+```{r}
+library(ArchR)
+library(dplyr)
+library(cluster)
+library(stringr)
+library(reshape2)
+library(ggpubr)
+library(pheatmap)
+library(Seurat)
+library(paletteer)
+library(GenomicRanges)
+set.seed(1)
+```
+
+
+Set the genome to be used for gene and genome annotations. This genome version must match the genome version that was used for alignment.
+```{r}
+addArchRGenome("hg38")
+## If error "Timeout of 60 seconds was reached" came up, set an option for the timeout limit in R as below and then rerun addArchRGenome("hg38")
+options(timeout=1000)
+getOption('timeout')
+```
+
+Create our Arrow Files. For each sample, this step will:
+Read accessible fragments from the provided input files.
+Calculate quality control information for each cell (i.e. TSS enrichment scores and nucleosome info).
+Filter cells based on quality control parameters.
+Create a genome-wide TileMatrix using 500-bp bins.
+Create a GeneScoreMatrix using the custom geneAnnotation that was defined when we called addArchRGenome().
+```{r}
+setwd("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round")
+ArrowFiles <- createArrowFiles(
+  inputFiles = c("/Data/iPSC_pacemaker/scATAC/CellRanger/D34_r0_P/outs/fragments.tsv.gz","/Data/iPSC_pacemaker/scATAC/CellRanger/D34_r1_P/outs/fragments.tsv.gz","/Data/iPSC_pacemaker/scATAC/CellRanger/D34_r2_P/outs/fragments.tsv.gz"),
+  sampleNames = c("D34_r0_P","D34_r1_P","D34_r2_P"),
+  minTSS = 4, #Don't set this too high because you can always increase later
+  minFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+## The files were written in the current folder (/Data/Reference/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/genes)
+```
+
+Inferring Doublets
+```{r}
+doubScores <- addDoubletScores(
+    input = ArrowFiles,
+    k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+    knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search with doublet projection.
+    LSIMethod = 1
+)
+
+#D34_r1_P (1 of 3) : UMAP Projection R^2 = 0.80932
+#D34_r2_P (2 of 3) : UMAP Projection R^2 = 0.8229
+#D34_r0_P (3 of 3) : UMAP Projection R^2 = 0.68015
+#Correlation of UMAP Projection is below 0.9 (normally this is ~0.99)
+#This means there is little heterogeneity in your sample and thus doubletCalling is inaccurate.
+#ArchR reports the R2 value for the UMAP projection for each Arrow file. If these R2 values are much lower (i.e. less than 0.9), this often indicates that the cells within the Arrow file have very little heterogeneity. This makes the accuracy of doublet calling worse because the majority of doublets would be “homotypic” - or a single droplet with two very similar cells. 
+#In these cases, we recommend skipping doublet prediction.
+```
+
+Creating An ArchRProject
+```{r}
+projPacemaker1 <- ArchRProject(
+  ArrowFiles = ArrowFiles, 
+  outputDirectory = "ArchRProject",
+  copyArrows = TRUE #This is recommended so that if you modify the Arrow files you have an original copy for later usage.
+)
+
+#Check how much memory is used to store the ArchRProject
+paste0("Memory Size = ", round(object.size(projPacemaker1) / 10^6, 3), " MB")
+
+#Check which data matrices are available within the ArchRProject
+getAvailableMatrices(projPacemaker1)
+```
+
+Make a ridge plot for each sample for the TSS enrichment scores.
+```{r}
+p1 <- plotGroups(
+    ArchRProj = projPacemaker1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "ridges"
+   )
+```
+
+Make a violin plot for each sample for the TSS enrichment scores.
+```{r}
+p2 <- plotGroups(
+    ArchRProj = projPacemaker1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    maxCells = 1000
+   )
+```
+
+Make a ridge plot for each sample for the log10(unique nuclear fragments).
+```{r}
+p3 <- plotGroups(
+    ArchRProj = projPacemaker1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "ridges"
+   )
+```
+
+Make a violin plot for each sample for the log10(unique nuclear fragments).
+```{r}
+p4 <- plotGroups(
+    ArchRProj = projPacemaker1, 
+    groupBy = "Sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+```
+
+To save editable vectorized versions of these plots, we use plotPDF().
+```{r}
+plotPDF(p1,p2,p3,p4, name = "QC-Sample-Statistics.pdf", ArchRProj = projPacemaker1, addDOC = FALSE, width = 4, height = 4)
+```
+
+Plot the fragment size distributions of all samples
+```{r}
+p1 <- plotFragmentSizes(ArchRProj = projPacemaker1)
+```
+
+Plot TSS enrichment profiles
+```{r}
+p2 <- plotTSSEnrichment(ArchRProj = projPacemaker1)
+```
+
+```{r}
+plotPDF(p1,p2, name = "QC-Sample-FragSizes-TSSProfile.pdf", ArchRProj = projPacemaker1, addDOC = FALSE, width = 5, height = 5)
+```
+
+Save ArchRProject() to use this project in future.
+```{r}
+saveArchRProject(ArchRProj = projPacemaker1, outputDirectory = "Save-ProjPacemaker1", load = FALSE)
+#projPacemaker1 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Save-ProjPacemaker1/Save-ArchR-Project.rds")
+```
+
+Skip Filtering Doublets from an ArchRProject as there is little heterogeneity in your sample
+
+
+Dimensionality reduction after testin different paramenters including # iterations, # varFeatures, resolutions in Pacemaerk_scATAC-seq_1.Rmd and Pacemaerk_scATAC-seq_2.Rmd
+Decide to use iteration = 2, resolution = 0.2 varFeatures = 50000 as the number of cells removed is small and better separation between cluster 5 and 6.
+```{r}
+#rm(projPacemaker2)
+projPacemaker2 <- addIterativeLSI(
+    ArchRProj = projPacemaker1,
+    useMatrix = "TileMatrix", 
+    name = "IterativeLSI", 
+    iterations = 2, 
+    #iterations = 6, 
+    clusterParams = list(
+        resolution = c(0.2), 
+        #resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        sampleCells = 10000, 
+        n.start = 10
+    ), 
+    #varFeatures = 25000, 
+    varFeatures = 50000,
+    dimsToUse = 1:30
+)
+# If error 'object 'logFile' not found' came up, try to lower the number of sampleCells.
+projPacemaker2@reducedDims
+```
+
+Batch Effect Correction wtih Harmony
+```{r}
+projPacemaker2 <- addHarmony(
+    ArchRProj = projPacemaker2,
+    reducedDims = "IterativeLSI",
+    name = "Harmony",
+    groupBy = "Sample"
+)
+```
+
+
+Clustering and UMAP embedding with the same parameters but for the “Harmony” reducedDims object:
+```{r}
+for(res in seq(0.1,2,0.05)){
+  projPacemaker2 <- addClusters(
+    input = projPacemaker2,
+    reducedDims = "Harmony",
+    method = "Seurat",
+    name = paste0("HarmonyClustersRes", res),
+    resolution = res,
+    force = TRUE
+)
+}
+
+names(projPacemaker2@cellColData)
+
+projPacemaker2 <- addUMAP(
+    ArchRProj = projPacemaker2, 
+    reducedDims = "Harmony", 
+    name = "UMAPHarmony", 
+    nNeighbors = 30, 
+    minDist = 0.5, 
+    metric = "cosine"
+)
+
+#p3 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "Sample", embedding = "UMAPHarmony", pal = custom_colors$discrete[1:3], labelSize = 0)
+
+p3 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "Sample", embedding = "UMAPHarmony", pal=c("D34_r1_P" = custom_colors$discrete[1], "D34_r2_P" = custom_colors$discrete[2], "D34_r0_P" = custom_colors$discrete[3]))
+plotPDF(p3, name = "Res0.8_Plot-UMAP2Harmony-Sample-Clusters.pdf", ArchRProj = projPacemaker2, addDOC = FALSE, width = 5, height = 5)
+
+names(projPacemaker2@cellColData)
+```
+
+
+```{r}
+# Count the number of clusters at different resolutions.
+projPacemaker2@cellColData
+Ncluster <- c()
+for(res in c(16:54)){
+  Ncluster <- c(Ncluster, length(unique(as.vector(projPacemaker2@cellColData[,res]))))
+#unique(atrial.cells@meta.data$SCT_snn_res.2)
+}
+res_ncluster <- data.frame(Res = seq(0.1,2,0.05), Ncluster = Ncluster)
+write.table(res_ncluster,"/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/ResolutionVsNclusters.txt", quote = F, sep = "\t", row.names = F)
+```
+
+Plot UMAP at different resolutions
+```{r}
+p0.1 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.1", embedding = "UMAPHarmony")
+p0.15 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.15", embedding = "UMAPHarmony")
+p0.2 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.2", embedding = "UMAPHarmony")
+p0.25 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.25", embedding = "UMAPHarmony")
+p0.3 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.3", embedding = "UMAPHarmony")
+p0.35 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.35", embedding = "UMAPHarmony")
+p0.4 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.4", embedding = "UMAPHarmony")
+p0.45 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.45", embedding = "UMAPHarmony")
+
+p0.5 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.5", embedding = "UMAPHarmony")
+p0.55 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.55", embedding = "UMAPHarmony")
+
+p0.6 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.6", embedding = "UMAPHarmony")
+p0.65 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.65", embedding = "UMAPHarmony")
+
+p0.7 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.7", embedding = "UMAPHarmony")
+p0.75 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.75", embedding = "UMAPHarmony")
+
+p0.8 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.8", embedding = "UMAPHarmony")
+p0.85 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.85", embedding = "UMAPHarmony")
+
+p0.9 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes0.9", embedding = "UMAPHarmony")
+
+p1.0 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1", embedding = "UMAPHarmony")
+
+p1.1 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.1", embedding = "UMAPHarmony")
+
+p1.2 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.2", embedding = "UMAPHarmony")
+
+p1.3 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.3", embedding = "UMAPHarmony")
+
+p1.4 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.4", embedding = "UMAPHarmony")
+
+p1.5 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.5", embedding = "UMAPHarmony")
+
+p1.6 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.6", embedding = "UMAPHarmony")
+
+p1.7 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.7", embedding = "UMAPHarmony")
+
+p1.8 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.8", embedding = "UMAPHarmony")
+
+p1.9 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes1.9", embedding = "UMAPHarmony")
+
+p2.0 <- plotEmbedding(ArchRProj = projPacemaker2, colorBy = "cellColData", name = "HarmonyClustersRes2", embedding = "UMAPHarmony")
+
+
+plotPDF(p0.1,p0.15,p0.2,p0.25,p0.3,p0.35,p0.4,p0.45,p0.5, p0.55,p0.6,p0.65,p0.7,p0.75,p0.8,p0.85,p0.9,p1.0, p1.1,p1.2,p1.3,p1.4,p1.5, p1.6,p1.7,p1.8,p1.9,p2.0,name = "Various_Resolutions_Plot-UMAP2Harmony-Sample-Clusters.pdf", ArchRProj = projPacemaker2, addDOC = FALSE, width = 5, height = 5)
+```
+
+Read in doublet info from AMULET.
+```{r}
+r0_dbl <- read.table("/Data/iPSC_pacemaker/scATAC/AMULET/D34_r0_P/MultipletBarcodes_01.txt", header = F)
+r1_dbl <- read.table("/Data/iPSC_pacemaker/scATAC/AMULET/D34_r1_P/MultipletBarcodes_01.txt", header = F)
+r2_dbl <- read.table("/Data/iPSC_pacemaker/scATAC/AMULET/D34_r2_P/MultipletBarcodes_01.txt", header = F)
+
+multiplet <- c(paste0("D34_r0_P#",r0_dbl$V1), paste0("D34_r1_P#",r1_dbl$V1), paste0("D34_r2_P#",r2_dbl$V1))
+
+rownames(projPacemaker2)
+projPacemaker2$multiplet <- ifelse(rownames(projPacemaker2) %in% multiplet, "Doublet", "Singlet")
+table(projPacemaker2$multiplet)
+#Doublet Singlet 
+#   2422   36322 
+table(projPacemaker2$multiplet, projPacemaker2$Sample)
+#          D34_r0_P D34_r1_P D34_r2_P
+#  Doublet      520     1105      797
+#  Singlet    10045    14718    11559
+table(projPacemaker2$multiplet, projPacemaker2$HarmonyClustersRes0.3)
+#             C1   C10   C11   C12    C2    C3    C4    C5    C6    C7    C8
+#  Doublet     0   371   854    12     0     0     0     0    25    14     1
+#  Singlet    26 10403 14598  1380     8     9     9    33  3040   321    28
+         
+#             C9
+#  Doublet  1145
+#  Singlet  6467
+
+
+p1 <- plotEmbedding(
+    ArchRProj = projPacemaker2, 
+    colorBy = "cellColData", 
+    name = "multiplet", 
+    embedding = "UMAPHarmony",
+    labelSize = 0
+    )
+
+
+#Save an editable vectorized version of this plot
+plotPDF(p1,
+    name = "Plot-UMAP-Doublet.pdf", 
+    ArchRProj = projPacemaker2, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+
+Visualizing Marker Genes
+```{r}
+markerGenes  <- c(
+    "TNNT2", "ACTN2",
+    "ALDH1A2","WT1","KRT8","KRT18","BNC1","PDPN",
+    "PHOX2B","PRPH","CHRNA3",
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5",
+    "NPPA","HAMP","MYH6","CPNE5","BMP4",
+    "MYL7","NR2F2","MYL4",
+    "MYL2","IRX4","HEY2","HOPX",
+    "EOMES","MESP1","MESP2",
+    "FOXA2","SOX17",
+    "NRG1","NPR3","FOXC1","MSX1","NFATC1"
+  )
+
+p <- plotEmbedding(
+    ArchRProj = projPacemaker2, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+#To plot a specific gene, we can subset this plot list:
+p$TNNT2
+
+plotPDF(plotList = p, 
+    name = "Canonical-Marker-Genes-WO-Imputation_Res0.35.pdf", 
+    ArchRProj = projPacemaker2, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+Marker Genes Imputation with MAGIC
+```{r}
+projPacemaker2 <- addImputeWeights(projPacemaker2)
+
+p <- plotEmbedding(
+    ArchRProj = projPacemaker2, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(projPacemaker2)
+)
+
+plotPDF(plotList = p, 
+    name = "Canonical-Marker-Genes-W-Imputation_Res0.35.pdf", 
+    ArchRProj = projPacemaker2, 
+    addDOC = FALSE, width = 5, height = 5)
+
+p <- plotEmbedding(
+    ArchRProj = projPacemaker2, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("ACTA2", "TAGLN", "MYH11", "MYLK", "CNN1"), 
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(projPacemaker2)
+)
+
+plotPDF(plotList = p, 
+    name = "SMC_Canonical-Marker-Genes-W-Imputation.pdf", 
+    ArchRProj = projPacemaker2, 
+    addDOC = FALSE, width = 5, height = 5)
+
+#Make a violin plot for each gene.
+p2 <- plotGroups(
+    ArchRProj = projPacemaker2, 
+    groupBy = "HarmonyClustersRes0.35", 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes,
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = custom_colors$discrete,
+    #xlabel = "Clusters"
+   )
+plotPDF(p2, name = "Canonical_Marker_Genes_Violin.pdf", ArchRProj = projPacemaker2, addDOC = FALSE, width = 6, height = 4)
+
+
+p2 <- plotGroups(
+    ArchRProj = projPacemaker2, 
+    groupBy = "HarmonyClustersRes0.45", 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes,
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = custom_colors$discrete,
+    #xlabel = "Clusters"
+   )
+plotPDF(p2, name = "Canonical_Marker_Genes_Violin_Res_0.45.pdf", ArchRProj = projPacemaker2, addDOC = FALSE, width = 6, height = 4)
+```
+
+
+It seems that Resolution 0.35 has better clustering.
+We can tabulate the number of cells present in each cluster:
+```{r}
+table(projPacemaker2$HarmonyClustersRes0.35)
+#   C1   C10   C11   C12   C13   C14    C2    C3    C4    C5    C6    C7    C8 
+#   26  6081   842   575  9864 13072     8     9     9    14    33  3070   335 
+#   C9 
+# 4806 
+```
+
+Create a cluster confusion matrix across each sample
+```{r}
+cM <- confusionMatrix(paste0(projPacemaker2$HarmonyClustersRes0.35), paste0(projPacemaker2$Sample))
+cM
+write.table(cM, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Cluster_confusion_matrix_across_each_sample_Res0.35.txt", sep = "\t", quote = FALSE)
+
+cM <- confusionMatrix(paste0(projPacemaker2$HarmonyClustersRes0.45), paste0(projPacemaker2$Sample))
+cM
+write.table(cM, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Cluster_confusion_matrix_across_each_sample_Res0.45.txt", sep = "\t", quote = FALSE)
+```
+
+Plot this confusion matrix as a heatmap
+```{r}
+cM <- cM / Matrix::rowSums(cM)
+p <- pheatmap::pheatmap(
+    mat = as.matrix(cM), 
+    color = paletteContinuous("whiteBlue"), 
+    border_color = "black"
+)
+pdf("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Cluster_confusion_matrix_across_each_sample_Res0.35.pdf")
+p
+dev.off()
+```
+
+```{r}
+saveArchRProject(ArchRProj = projPacemaker2, outputDirectory = "Save-projPacemaker2", load = FALSE)
+#projPacemaker2 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker2/Save-ArchR-Project.rds")
+```
+
+Use Resolution 0.45.
+Remove the clusters with cells only from one sample (C1-C4) or only from two samples (C5, C8) or very few cells (C9, 24 cells)  or showing no clear expression pattern of any canonical marker of any cell type (C6). This removes cluster C1-C6, C8, C9.
+```{r}
+projPacemaker8 <- projPacemaker2[projPacemaker2$HarmonyClustersRes0.45=="C7" | projPacemaker2$HarmonyClustersRes0.45=="C10" | projPacemaker2$HarmonyClustersRes0.45=="C11" | projPacemaker2$HarmonyClustersRes0.45=="C12" | projPacemaker2$HarmonyClustersRes0.45=="C13" | projPacemaker2$HarmonyClustersRes0.45=="C14" | projPacemaker2$HarmonyClustersRes0.45=="C15" | projPacemaker2$HarmonyClustersRes0.45=="C16",]
+
+table(projPacemaker8$HarmonyClustersRes0.45)
+#  C10   C11   C12   C13   C14   C15   C16    C7 
+#  830  4902 11086  5263  5812  6727   600   335
+
+
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C12"]="0"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C15"]="1"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C14"]="2"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C13"]="3"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C11"]="4"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C10"]="5"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C16"]="6"
+projPacemaker8$HarmonyClustersRes0.45[projPacemaker8$HarmonyClustersRes0.45=="C7"]="7"
+
+
+#projPacemaker3$HarmonyClustersRes0.35_2 = as.factor(projPacemaker3$HarmonyClustersRes0.35_2)
+p0.45 <- plotEmbedding(ArchRProj = projPacemaker8, colorBy = "cellColData", name = "HarmonyClustersRes0.45", embedding = "UMAPHarmony", plotAs = "points", size = 1)
+#pal=c("D34_r1_P" = custom_colors$discrete[1], "D34_r2_P" = custom_colors$discrete[2], "D34_r0_P" = custom_colors$discrete[3])
+plotPDF(p0.45, name = "UMAP2Harmony_Res0.45_PostRemoving.pdf", ArchRProj = projPacemaker8, addDOC = FALSE, width = 5, height = 5)
+
+#### One cell is an outlier and try to remove it for viewing purpose:
+projPacemaker8@embeddings
+#List of length 1
+#names(1): UMAPHarmony
+
+projPacemaker8@embeddings$UMAPHarmony
+head(projPacemaker8@embeddings$UMAPHarmony$df)
+
+projPacemaker8@embeddings$UMAPHarmony$df[,2]
+
+head(sort(projPacemaker3@embeddings$UMAPHarmony$df[,2]))
+#[1] -10.447699  -5.893878  -5.884970  -5.881406  -5.865442  -5.855182
+
+dim(projPacemaker8@embeddings$UMAPHarmony$df)
+#[1] 35575     2
+
+tmp <- projPacemaker8@embeddings$UMAPHarmony$df
+names(tmp) <- c("UMAPHarmony1", "UMAPHarmony2")
+tmp1 <- filter(tmp, UMAPHarmony2 > -10)
+
+projPacemaker9 <- projPacemaker8[rownames(tmp1),]
+
+
+# Try different colors provided by ArchR.
+for(i in 1:length(names(ArchRPalettes))){
+  # Only use the color palettes with enough colors.
+  if(length(ArchRPalettes[[i]]) >= length(unique(projPacemaker9$HarmonyClustersRes0.45))){
+    cus_color = ArchRPalettes[[i]]
+    # Change the color name so it starts from 0 rather than 1.
+    names(cus_color) = as.character(as.numeric(names(cus_color)) - 1)
+    p0.45_filter <- plotEmbedding(ArchRProj = projPacemaker9, colorBy = "cellColData", name = "HarmonyClustersRes0.45", embedding = "UMAPHarmony", plotAs = "points", size = 1, pal = cus_color)
+
+    plotPDF(p0.45_filter, name = paste0("UMAP2Harmony_Res0.45_PostRemoving_filter.", names(ArchRPalettes)[i], ".pdf"), ArchRProj = projPacemaker9, addDOC = FALSE, width = 5, height = 5)
+  }
+}
+
+## Seems the default color is the best to use.
+p0.45_filter <- plotEmbedding(ArchRProj = projPacemaker9, colorBy = "cellColData", name = "HarmonyClustersRes0.45", embedding = "UMAPHarmony", plotAs = "points", size = 1, rastr = FALSE)
+plotPDF(p0.45_filter, name = "UMAP2Harmony_Res0.45_PostRemoving_filter.pdf", ArchRProj = projPacemaker9, addDOC = FALSE, width = 5, height = 5)
+#projPacemaker3@reducedDims$Harmony
+#List of length 5
+#names(5): matDR params date scaleDims corToDepth
+```
+
+
+Visualizing Marker Genes after imputation with MAGIC
+```{r}
+markerGenes  <- c(
+    "TNNT2", "ACTN2",
+    "ALDH1A2","WT1","KRT8","KRT18","BNC1","PDPN",
+    "PHOX2B","PRPH","CHRNA3",
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5",
+    "NPPA","HAMP","ADM","CPNE5","BMP4",
+    "MYL7","NR2F2", "MYL4",
+    "MYL2","IRX4","HEY2","HOPX",
+    "EOMES","MESP1","MESP2",
+    "FOXA2","SOX17",
+    "NRG1","NPR3","FOXC1","MSX1","NFATC1"
+  )
+projPacemaker9 <- addImputeWeights(projPacemaker9)
+
+p <- plotEmbedding(
+    ArchRProj = projPacemaker9, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(projPacemaker9)
+)
+
+plotPDF(plotList = p, 
+    name = "Canonical-Marker-Genes-W-Imputation_Res0.45_filtering.pdf", 
+    ArchRProj = projPacemaker9, 
+    addDOC = FALSE, width = 5, height = 5)
+
+#Make a violin plot for each gene.
+p2 <- plotGroups(
+    ArchRProj = projPacemaker9, 
+    groupBy = "HarmonyClustersRes0.45", 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes,
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE
+    #pal = paletteer_d("ggthemes::excel_Paper")[c(1,2,4,3,5)],
+    #xlabel = "Clusters"
+   )
+plotPDF(p2, name = "Canonical_Marker_Genes_Violin_Res0.45_filtering.pdf", ArchRProj = projPacemaker9, addDOC = FALSE, width = 5, height = 4)
+```
+
+
+```{r}
+#saveArchRProject(ArchRProj = projPacemaker9, outputDirectory = "Save-projPacemaker9", load = FALSE)
+#projPacemaker9 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker9/Save-ArchR-Project.rds")
+```
+
+
+###########################################################################################################
+Export Group BigWigs (group, summarize and export a bigwig for each group in an ArchRProject.
+```{r}
+getGroupBW(
+  ArchRProj = projPacemaker9,
+  groupBy = "HarmonyClustersRes0.45",
+  normMethod = "ReadsInTSS",
+  tileSize = 25,
+  maxCells = 20000,
+  ceiling = 4,
+  verbose = TRUE,
+  threads = getArchRThreads(),
+  logFile = createLogFile("getGroupBW")
+)
+#[1] "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/GroupBigWigs/HarmonyClustersRes0.45/
+```
+
+
+Constrained Integration for each annotated cluster separately.
+```{r}
+#Read in scRNA-seq data
+pacemaker.combined.sct <- readRDS("/Data/iPSC_pacemaker/Seurat/D34_First/PacemakerCells/Integration/Final/D34.pacemaker.2nd.round.clustering.after.1st.filtering.rds")
+DefaultAssay(pacemaker.combined.sct) <- "RNA" # This line is necessary as shown here: https://github.com/GreenleafLab/ArchR/blob/master/R/RNAIntegration.R
+#projPacemaker9 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker9/Save-ArchR-Project.rds")
+
+#RNA get cells in these categories
+rnaSANhead <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("2")]
+
+head(rnaSANhead)
+
+#rnaSANtail <- rownames(pacemaker.combined.sct@meta.data)[grep("2", pacemaker.combined.sct@meta.data$integrated_snn_res.0.3)]
+rnaSANtail <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("0", "3")]
+
+#rnaSANtran <- rownames(pacemaker.combined.sct@meta.data)[grep("5|7", pacemaker.combined.sct@meta.data$integrated_snn_res.0.3)]
+rnaSANtran <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("1")]
+
+#rnaPrecurser <- rownames(pacemaker.combined.sct@meta.data)[grep("3", pacemaker.combined.sct@meta.data$integrated_snn_res.0.3)]
+rnaACMtran <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("4")]
+
+rnaSinus <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("6", "7", "8")]
+
+#rnaNonCardio <- rownames(pacemaker.combined.sct@meta.data)[grep("11", pacemaker.combined.sct@meta.data$integrated_snn_res.0.3)]
+rnaNonCardio <- rownames(pacemaker.combined.sct@meta.data)[pacemaker.combined.sct@meta.data$integrated_snn_res.0.8 %in% c("9", "10")]
+
+# Create a nested list for constrained integration.
+groupList <- SimpleList(
+    SANhead = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("2")],
+        RNA = rnaSANhead
+    ),
+    SANtail = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("1", "4", "6")],
+        RNA = rnaSANtail
+    ),
+    SANtran = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("0")],
+        RNA = rnaSANtran
+    ),
+    ACMtran = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("5")],
+        RNA = rnaACMtran
+    ),
+    Sinus = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("3")],
+        RNA = rnaSinus
+    ),
+    NonCardio = SimpleList(
+        ATAC = projPacemaker9$cellNames[projPacemaker9$HarmonyClustersRes0.45 %in% c("7")],
+        RNA = rnaNonCardio
+    )    
+)
+
+# Perform Constrained Integration
+projPacemaker9 <- addGeneIntegrationMatrix(
+    ArchRProj = projPacemaker9, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix",
+    reducedDims = "Harmony",
+    seRNA = pacemaker.combined.sct,
+    addToArrow = FALSE, 
+    groupList = groupList,
+    groupRNA = "integrated_snn_res.0.8",
+    nameCell = "predictedCell",
+    nameGroup = "predictedGroup",
+    nameScore = "predictedScore"
+)
+
+#Similarly, we can visualize the integration by overlaying the scRNA-seq cell types on our scATAC-seq data based on the constrained integration.
+p3 <- plotEmbedding(
+    projPacemaker9, 
+    colorBy = "cellColData", 
+    name = "predictedGroup", 
+    embedding = "UMAPHarmony",
+    #pal = pal, 
+    pal=c("0" = paletteer_d("ggthemes::Tableau_10")[1], "1" = paletteer_d("ggthemes::Tableau_10")[2], "2" = paletteer_d("ggthemes::Tableau_10")[3], "3" = paletteer_d("ggthemes::Tableau_10")[4], "4" = paletteer_d("ggthemes::Tableau_10")[5], "5" = paletteer_d("ggthemes::Tableau_10")[6], "6" = paletteer_d("ggthemes::Tableau_10")[7], "7" = paletteer_d("ggthemes::Tableau_10")[8], "8" = paletteer_d("ggthemes::Tableau_10")[9], "9" = paletteer_d("ggthemes::Tableau_10")[10], "10" = paletteer_d("ggthemes::Miller_Stone")[1]),
+    plotAs = "points", size = 1
+)
+plotPDF(p3, name = "Res0.45.Plot-UMAP-RNA-Integration.filtering.pdf", ArchRProj = projPacemaker9, addDOC = FALSE, width = 5, height = 5)
+```
+
+
+Adding Pseudo-scRNA-seq profiles for each scATAC-seq cell
+```{r}
+#Re-run the integration with addToArrow = TRUE to add the linked gene expression data to each of the Arrow files.
+projPacemaker9 <- addGeneIntegrationMatrix(
+    ArchRProj = projPacemaker9, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix",
+    reducedDims = "Harmony",
+    seRNA = pacemaker.combined.sct,
+    addToArrow = TRUE, 
+    groupList = groupList,
+    force= TRUE,
+    groupRNA = "integrated_snn_res.0.8",
+    nameCell = "predictedCell",
+    nameGroup = "predictedGroup",
+    nameScore = "predictedScore"
+)
+
+getAvailableMatrices(projPacemaker9)
+
+#Add impute weights to our project
+projPacemaker9 <- addImputeWeights(projPacemaker9)
+
+#Make some UMAP plots overlayed with the gene expression values from our GeneIntegrationMatrix.
+markerGenes  <- c(
+    "TNNT2", "ACTN2",
+    "ALDH1A2","WT1","KRT8","KRT18","BNC1","PDPN",
+    "PHOX2B","PRPH","CHRNA3",
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5",
+    "NPPA","HAMP","MYH6","CPNE5","BMP4","ADM",
+    "MYL7","NR2F2", "MYL4",
+    "MYL2","IRX4","HEY2","HOPX",
+    "EOMES","MESP1","MESP2",
+    "FOXA2",
+    "NRG1","NPR3","FOXC1","MSX1","NFATC1"
+  )
+
+p1 <- plotEmbedding(
+    ArchRProj = projPacemaker9, 
+    colorBy = "GeneIntegrationMatrix", 
+    name = markerGenes, 
+    continuousSet = "horizonExtra",
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(projPacemaker9)
+)
+
+#Make the same UMAP plots but overlay them with the gene score values from our GeneScoreMatrix
+p2 <- plotEmbedding(
+    ArchRProj = projPacemaker9, 
+    colorBy = "GeneScoreMatrix", 
+    continuousSet = "horizonExtra",
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(projPacemaker9)
+)
+
+#Save an editable vectorized version of this plot
+plotPDF(p1,p2,
+    name = "Res0.45_Plot-UMAP-Marker-Genes-RNA-Integration.pdf", 
+    ArchRProj = projPacemaker9, 
+    addDOC = FALSE, width = 5, height = 5)
+
+p3 <- plotGroups(
+    ArchRProj = projPacemaker9, 
+    groupBy = "HarmonyClustersRes0.45", 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes,
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = custom_colors$discrete,
+    #xlabel = "Clusters"
+   )
+
+p4 <- plotGroups(
+    ArchRProj = projPacemaker9, 
+    groupBy = "HarmonyClustersRes0.45", 
+    colorBy = "GeneIntegrationMatrix", 
+    name = markerGenes,
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE,
+    pal = custom_colors$discrete,
+    imputeWeights = getImputeWeights(projPacemaker9)
+    #xlabel = "Clusters"
+   )
+plotPDF(p4,p3, name = "Res0.45_Canonical_Marker_Genes_Violin_GeneIntegrationMatrix.pdf", ArchRProj = projPacemaker9, addDOC = FALSE, width = 5, height = 4)
+
+cM <- as.matrix(confusionMatrix(projPacemaker9$HarmonyClustersRes0.45, projPacemaker9$predictedGroup))
+#     0    6    2    7    3     1   8   9  10   4
+#4 4648    0    0    0  254     0   0   0   0   0
+#3    0 3550    0 1408    0     0 305   0   0   0
+#2    0    0 5812    0    0     0   0   0   0   0
+#1 1603    0    0    0 5124     0   0   0   0   0
+#0    0    0    0    0    0 11085   0   0   0   0
+#7    0    0    0    0    0     0   0 217 118   0
+#5    0    0    0    0    0     0   0   0   0 830
+#6   84    0    0    0  516     0   0   0   0   0
+write.table(cM,"/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_RNA_Integration_confusionMatrix.txt", sep = "\t", quote = F)
+
+predictedCell <- as.data.frame(table(projPacemaker9$predictedCell))
+
+predictedCell <- arrange(predictedCell, desc(Freq))
+pdf("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_predictedCell_Freq.pdf")
+plot(density(predictedCell$Freq))
+dev.off()
+write.table(predictedCell,"/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_predictedCell_Frequency.txt", sep = "\t", quote = F)
+```
+
+Making Pseudo-bulk Replicates
+```{r}
+projPacemaker9 <- addGroupCoverages(ArchRProj = projPacemaker9, groupBy = "HarmonyClustersRes0.45", maxCells = 10000, minReplicates = 3)
+```
+
+Calling Peaks w/ Macs2
+```{r}
+projPacemaker9 <- addReproduciblePeakSet(
+    ArchRProj = projPacemaker9, 
+    groupBy = "HarmonyClustersRes0.45", 
+    pathToMacs2 = "/usr/local/bin/macs2"
+)
+
+peakset <- getPeakSet(projPacemaker9)
+write.table(peakset, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peakset.txt", sep = "\t", quote = F, row.names = F)
+
+#saveArchRProject(ArchRProj = projPacemaker9, outputDirectory = "Save-projPacemaker9", load = FALSE)
+
+#projPacemaker9 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker9/Save-ArchR-Project.rds")
+
+# To prepare for downstream analyses, we can create a new ArchRProject and add a new matrix to it containing insertion counts within our new merged peak set.
+
+projPacemaker10 <- addPeakMatrix(projPacemaker9)
+
+getAvailableMatrices(projPacemaker10)
+```
+
+
+Identifying Marker Peaks 
+```{r}
+markersPeaks <- getMarkerFeatures(
+    ArchRProj = projPacemaker10, 
+    useMatrix = "PeakMatrix", 
+    groupBy = "HarmonyClustersRes0.45",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon",
+  maxCells = 10000
+)
+
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.05 & Log2FC >= 0.5")
+for(i in 1:8){
+  print(dim(markerList[[i]]))
+}
+#[1] 18802     7
+#[1] 6524    7
+#[1] 16654     7
+#[1] 44886     7
+#[1] 5087    7
+#[1] 78  7
+#[1] 0 7
+#[1] 4120    7
+
+markerList$'0'
+
+heatmapPeaks <- plotMarkerHeatmap(
+  seMarker = markersPeaks, 
+  cutOff = "FDR <= 0.05 & Log2FC >= 0.5",
+  transpose = TRUE
+)
+# Default color palette is solarExtra
+
+plotPDF(heatmapPeaks, name = "Res0.45_Peak-Marker-Heatmap", width = 8, height = 6, ArchRProj = projPacemaker10, addDOC = FALSE)
+
+### Try different colors and decide to go with "beach" palette.
+for(i in 1:length(ArchRPalettes)){
+  heatmapPeaks <- plotMarkerHeatmap(
+    seMarker = markersPeaks, 
+    cutOff = "FDR <= 0.05 & Log2FC >= 0.5",
+    transpose = TRUE,
+    pal = paletteContinuous(set = names(ArchRPalettes[i]), n = 256, reverse = FALSE)
+  )
+  plotPDF(heatmapPeaks, name = paste0("Res0.45_Peak-Marker-Heatmap-", names(ArchRPalettes[i])), width = 8, height = 6, ArchRProj = projPacemaker10, addDOC = FALSE)
+}
+
+# Export the marker peaks for each cluster.
+#C0MarkPeaks <- readRDS("/home/xzhang08/Save-projPacemaker9/PeakCalls/C0-reproduciblePeaks.gr.rds")
+for(i in 1:8){
+  print(dim(markerList[[i]]))
+  write.table(markerList[[i]], paste0("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_C", i-1, "MarkPeaks.bed"), sep = "\t", quote = F, row.names = F)
+}
+#write.table(markerList$'0', "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_C0MarkPeaks.bed", sep = "\t", quote = F, row.names = F)
+
+saveArchRProject(ArchRProj = projPacemaker10, outputDirectory = "Save-projPacemaker10", load = FALSE)
+projPacemaker10 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker10/Save-ArchR-Project.rds")
+```
+
+
+Motif Enrichment in Marker Peaks
+```{r}
+# add these motif annotations
+projPacemaker10 <- addMotifAnnotations(ArchRProj = projPacemaker10, motifSet = "cisbp", name = "Motif")
+
+peakAnnoMatches <- getMatches(ArchRProj = projPacemaker10, name = "Motif")
+
+peakAnnoMatchesAssay <- peakAnnoMatches@assays@data[[1]]
+
+write.table(peakAnnoMatchesAssay, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_peakAnnoMatchesAssay.txt", sep = "\t", quote = F)
+```
+
+
+```{r}
+markerList <- getMarkers(markersPeaks, cutOff = "FDR <= 0.05 & Log2FC >= 0.5")
+
+for(i in 1:8){
+  print(dim(markerList[[i]]))
+}
+
+enrichMotifs <- peakAnnoEnrichment(
+    seMarker = markersPeaks,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.05 & Log2FC >= 0.5"
+  )
+
+names(assays(enrichMotifs))
+# [1] "mlog10Padj"            "mlog10p"               "Enrichment"           
+# [4] "BackgroundProporition" "nBackground"           "BackgroundFrequency"  
+# [7] "CompareProportion"     "nCompare"              "CompareFrequency"     
+#[10] "feature"
+
+# mlog10Padj represents "Minus Log10 Padj"
+#head(assays(enrichMotifs)$nCompare)
+
+#assays(enrichMotifs)$mlog10Padj[grep("BACH1",rownames(assays(enrichMotifs)$mlog10Padj)),]
+
+#head(assays(enrichMotifs)$mlog10Padj)
+
+#head(arrange(assays(enrichMotifs)$mlog10Padj, desc(C4)), n=10)
+
+# Export the enrichment results (minus log10 padj) for each TF 
+write.table(assays(enrichMotifs)$mlog10Padj, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_TF_enrichment_mlog10Padj.txt", sep = "\t", quote = F)
+
+heatmapEM <- plotEnrichHeatmap(enrichMotifs, n = 15, transpose = TRUE, cutOff = 2)
+
+# Note that the TF labels in the heatmap are something like MAFB_150(8). MAFB is the TF, 150 is the index number of the TF, 8 is the rounded minus log10 padj of the smallest padj among all clusters. Also note that the inus log10 padj for each TF is normalized as shown in the color scale. Max number is normalized to 100.
+
+plotPDF(heatmapEM, name = "Res0.45_Motifs-Enriched-Marker-Heatmap", width = 10, height = 6, ArchRProj = projPacemaker10, addDOC = FALSE)
+
+heatmapEM_2 <- plotEnrichHeatmap(enrichMotifs, n = 20, transpose = TRUE, cutOff = 2)
+
+plotPDF(heatmapEM_2, name = "Res0.45_Motifs-Enriched-Marker-Heatmap_2", width = 11, height = 7, ArchRProj = projPacemaker10, addDOC = FALSE)
+```
+
+Pairwise Testing Between Groups C2 vs. C1+C4+C6  (SAN head vs. tail)
+```{r}
+# Compare the SAN tail cells with atrial cells.
+markerTest <- getMarkerFeatures(
+  ArchRProj = projPacemaker10, 
+  useMatrix = "PeakMatrix",
+  groupBy = "HarmonyClustersRes0.45",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "2",
+  bgdGroups = c("1","4","6"),
+  maxCells = 6000,
+)
+
+rowData(markerTest)
+
+C2vsC146_DiffPeaks <- cbind(rowData(markerTest),assays(markerTest)$Log2FC, assays(markerTest)$FDR)
+names(C2vsC146_DiffPeaks)[5:6] = c("Log2FCC0_C1", "FDR")
+
+dim(filter(as.data.frame(C2vsC146_DiffPeaks), FDR <= 0.01 & Log2FCC0_C1 >= 1))
+#[1] 6504    6
+dim(filter(as.data.frame(C2vsC146_DiffPeaks), FDR <= 0.01 & Log2FCC0_C1 <= -1))
+#[1] 5905    6
+
+write.table(C2vsC146_DiffPeaks, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_C2vsC146_Differential_Peaks.txt", sep = "\t", quote = F, row.names = F)
+
+head(assays(markerTest)$FDR)
+# We can then plot an MA or Volcano plot using the markerPlot() function
+head_MA <- plotMarkers(seMarker = markerTest, name = "2", cutOff = "FDR <= 0.01 & abs(Log2FC) >= 1", plotAs = "MA")
+head_MA
+head_vol <- plotMarkers(seMarker = markerTest, name = "2", cutOff = "FDR <= 0.01 & abs(Log2FC) >= 1", plotAs = "Volcano")
+head_vol
+
+plotPDF(head_MA, head_vol, name = "C2vsC146-Markers-MA-Volcano", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+```
+
+Motif Enrichment in Differential Peaks
+```{r}
+# add these motif annotations
+#projPacemaker10 <- addMotifAnnotations(ArchRProj = projPacemaker10, motifSet = "cisbp", name = "Motif")
+
+# testing for motif enrichment
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC >= 1"
+  )
+
+# prepare this data for plotting with ggplot
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+# Export the enrichment results (minus log10 padj) for each TF 
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Up_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+
+tmpUp <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Up_mlog10Padj.txt", sep = "\t", header = TRUE)
+
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC <= -1"
+  )
+
+#motifsDo <- peakAnnoEnrichment(
+#    seMarker = markerTest,
+#    ArchRProj = projPacemaker10,
+#    peakAnnotation = "Motif",
+#    cutOff = "FDR <= 0.1 & Log2FC <= -0.5"
+#  )
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Down_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+tmpDown <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Down_mlog10Padj.txt", sep = "\t", header = TRUE)
+
+tmp <- merge(tmpUp,tmpDown, by = "TF")
+names(tmp) <- c("TF","HeadVsTail_Up","HeadVsTail_Down")
+write.table(tmp, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+
+df$rank <- seq_len(nrow(df))
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 1,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+#plotPDF(ggUp, ggDo, name = "C0-vs-C1-Markers-Motifs-Enriched", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+plotPDF(ggUp, ggDo, name = "Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_LogFC", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+```
+
+Test if the getMarkerFeatures function worked as expected for multiple clusters comparison.
+Pairwise Testing Between Groups C2 vs. C1+C4+C6  (SAN head vs. tail)
+```{r}
+projPacemaker10$HarmonyClustersRes0.45_Anno <- projPacemaker10$HarmonyClustersRes0.45
+projPacemaker10$HarmonyClustersRes0.45_Anno[projPacemaker10$HarmonyClustersRes0.45_Anno=="1" | projPacemaker10$HarmonyClustersRes0.45_Anno=="4" | projPacemaker10$HarmonyClustersRes0.45_Anno=="6"] = "SAN_Tail"
+
+# Compare the SAN head cells with tail cells.
+markerTest <- getMarkerFeatures(
+  ArchRProj = projPacemaker10, 
+  useMatrix = "PeakMatrix",
+  groupBy = "HarmonyClustersRes0.45_Anno",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "2",
+  bgdGroups = "SAN_Tail",
+  maxCells = 6000,
+)
+
+rowData(markerTest)
+
+C2vsC146_DiffPeaks <- cbind(rowData(markerTest),assays(markerTest)$Log2FC, assays(markerTest)$FDR)
+names(C2vsC146_DiffPeaks)[5:6] = c("Log2FCC0_C1", "FDR")
+
+dim(filter(as.data.frame(C2vsC146_DiffPeaks), FDR <= 0.01 & Log2FCC0_C1 >= 1))
+#[1] 6504    6
+dim(filter(as.data.frame(C2vsC146_DiffPeaks), FDR <= 0.01 & Log2FCC0_C1 <= -1))
+#[1] 5905    6
+
+write.table(C2vsC146_DiffPeaks, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_C2vsC146_Differential_Peaks.txt", sep = "\t", quote = F, row.names = F)
+
+```
+
+Motif Enrichment in Differential Peaks
+```{r}
+# add these motif annotations
+#projPacemaker10 <- addMotifAnnotations(ArchRProj = projPacemaker10, motifSet = "cisbp", name = "Motif")
+
+# testing for motif enrichment
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC >= 1"
+  )
+
+# prepare this data for plotting with ggplot
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+# Export the enrichment results (minus log10 padj) for each TF 
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Up_mlog10Padj_2.txt", sep = "\t", quote = F, row.names = F)
+
+tmpUp <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Up_mlog10Padj_2.txt", sep = "\t", header = TRUE)
+
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC <= -1"
+  )
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Down_mlog10Padj_2.txt", sep = "\t", quote = F, row.names = F)
+tmpDown <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_Down_mlog10Padj_2.txt", sep = "\t", header = TRUE)
+
+tmp <- merge(tmpUp,tmpDown, by = "TF")
+names(tmp) <- c("TF","HeadVsTail_Up","HeadVsTail_Down")
+write.table(tmp, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head-vs-Tail-Markers-Motifs-Enriched_mlog10Padj_2.txt", sep = "\t", quote = F, row.names = F)
+```
+Although the results are not exactly the same due to the random background cell selection, but the top TFs enriched are similar, so the multiple clusters in the 'bgdGroups' parameter in getMarkerFeatures worked. But note that in the 'useGroups' parameter, multiple clusters will lead to ArchR do comparison between each cluster in the 'useGroups' vs 'bgdGroups'. So in order to compare multiple clusters, one better generate a separate column in ArchR object and do single group comparison, which is like the one below.
+
+
+Pairwise Testing Between Groups C1+C2+C4+C6 vs. C0+C5  [all pacemaker-like (Head + Tail) vs. all atrial-like (ACM-Like + transitional)]
+```{r}
+# Compare the SAN tail cells with atrial cells.
+projPacemaker10$HarmonyClustersRes0.45_Anno <- projPacemaker10$HarmonyClustersRes0.45
+projPacemaker10$HarmonyClustersRes0.45_Anno[projPacemaker10$HarmonyClustersRes0.45_Anno=="1" | projPacemaker10$HarmonyClustersRes0.45_Anno=="2" | projPacemaker10$HarmonyClustersRes0.45_Anno=="4" | projPacemaker10$HarmonyClustersRes0.45_Anno=="6"] = "SAN_Head_Tail"
+
+projPacemaker10$HarmonyClustersRes0.45_Anno[projPacemaker10$HarmonyClustersRes0.45_Anno=="0" | projPacemaker10$HarmonyClustersRes0.45_Anno=="5"] = "SAN_Tran_ACM"
+
+markerTest <- getMarkerFeatures(
+  ArchRProj = projPacemaker10, 
+  useMatrix = "PeakMatrix",
+  groupBy = "HarmonyClustersRes0.45_Anno",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "SAN_Head_Tail",
+  bgdGroups = "SAN_Tran_ACM",
+  maxCells = 6000,
+)
+
+rowData(markerTest)
+
+C1C2C4C6vsC05_DiffPeaks <- cbind(rowData(markerTest),assays(markerTest)$Log2FC, assays(markerTest)$FDR)
+names(C1C2C4C6vsC05_DiffPeaks)[5:6] = c("Log2FC_C1C2C4C6vsC05", "FDR")
+
+dim(filter(as.data.frame(C1C2C4C6vsC05_DiffPeaks), FDR <= 0.01 & Log2FC_C1C2C4C6vsC05 >= 1))
+# [1] 14612     6
+dim(filter(as.data.frame(C1C2C4C6vsC05_DiffPeaks), FDR <= 0.01 & Log2FC_C1C2C4C6vsC05 <= -1))
+#[1] 3851    6
+
+write.table(C1C2C4C6vsC05_DiffPeaks, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_C1C2C4C6vsC05_Differential_Peaks.txt", sep = "\t", quote = F, row.names = F)
+
+head(assays(markerTest)$FDR)
+# We can then plot an MA or Volcano plot using the markerPlot() function
+head_MA <- plotMarkers(seMarker = markerTest, name = "SAN_Head_Tail", cutOff = "FDR <= 0.01 & abs(Log2FC) >= 1", plotAs = "MA")
+head_MA
+head_vol <- plotMarkers(seMarker = markerTest, name = "SAN_Head_Tail", cutOff = "FDR <= 0.01 & abs(Log2FC) >= 1", plotAs = "Volcano")
+head_vol
+
+plotPDF(head_MA, head_vol, name = "C1C2C4C6vsC05-Markers-MA-Volcano", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+```
+
+Motif Enrichment in Differential Peaks
+```{r}
+# add these motif annotations
+#projPacemaker10 <- addMotifAnnotations(ArchRProj = projPacemaker10, motifSet = "cisbp", name = "Motif")
+
+# testing for motif enrichment
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC >= 1"
+  )
+
+# prepare this data for plotting with ggplot
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+# Export the enrichment results (minus log10 padj) for each TF 
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head_Tail_vs_Tran_ACM_-Markers-Motifs-Enriched_Up_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+
+tmpUp <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head_Tail_vs_Tran_ACM_-Markers-Motifs-Enriched_Up_mlog10Padj.txt", sep = "\t", header = TRUE)
+
+df$rank <- seq_len(nrow(df))
+head(df)
+
+ggUp <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 2,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = projPacemaker10,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.01 & Log2FC <= -1"
+  )
+
+#motifsDo <- peakAnnoEnrichment(
+#    seMarker = markerTest,
+#    ArchRProj = projPacemaker10,
+#    peakAnnotation = "Motif",
+#    cutOff = "FDR <= 0.1 & Log2FC <= -0.5"
+#  )
+
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+write.table(df, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head_Tail_vs_Tran_ACM-Markers-Motifs-Enriched_Down_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+tmpDown <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head_Tail_vs_Tran_ACM-Markers-Motifs-Enriched_Down_mlog10Padj.txt", sep = "\t", header = TRUE)
+
+tmp <- merge(tmpUp,tmpDown, by = "TF")
+names(tmp) <- c("TF","Head_Tail_vs_Tran_ACM_Up","Head_Tail_vs_Tran_ACM_Down")
+write.table(tmp, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Head_Tail_vs_Tran_ACM-Markers-Motifs-Enriched_mlog10Padj.txt", sep = "\t", quote = F, row.names = F)
+
+df$rank <- seq_len(nrow(df))
+
+ggDo <- ggplot(df, aes(rank, mlog10Padj, color = mlog10Padj)) + 
+  geom_point(size = 1) +
+  ggrepel::geom_label_repel(
+        data = df[rev(seq_len(30)), ], aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 1.5,
+        nudge_x = 1,
+        color = "black"
+  ) + theme_ArchR() + 
+  ylab("-log10(FDR) Motif Enrichment") +
+  xlab("Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))
+
+#plotPDF(ggUp, ggDo, name = "C0-vs-C1-Markers-Motifs-Enriched", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+plotPDF(ggUp, ggDo, name = "Res0.45_Head_Tail_vs_Tran_ACM-Markers-Motifs-Enriched_LogFC", width = 5, height = 5, ArchRProj = projPacemaker10, addDOC = FALSE)
+```
+
+
+
+
+#################################################################################
+Subclustering of SAN Tail and Head cells.
+```{r}
+idxPass <- BiocGenerics::which(projPacemaker10$HarmonyClustersRes0.45 %in% c("2","1", "4", "6"))
+cellsPass <- projPacemaker10$cellNames[idxPass]
+write.table(cellsPass, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_SAN.head.tail.cells.txt", sep = "\t", quote = F)
+projPacemaker1 <- readRDS("/Data/iPSC_pacemaker/scATAC/ArchR/Save-ProjPacemaker1/Save-ArchR-Project.rds")
+sancm <- projPacemaker1[cellsPass, ]
+
+# Dimensionality reduction
+sancm2 <- addIterativeLSI(
+    ArchRProj = sancm,
+    useMatrix = "TileMatrix", 
+    name = "IterativeLSI", 
+    iterations = 2, 
+    #iterations = 6, 
+    clusterParams = list(
+        resolution = c(0.2), 
+        #resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        sampleCells = 10000, 
+        n.start = 10
+    ), 
+    #varFeatures = 25000, 
+    varFeatures = 50000,
+    dimsToUse = 1:30
+)
+#Batch Effect Correction wtih Harmony
+sancm2 <- addHarmony(
+    ArchRProj = sancm2,
+    reducedDims = "IterativeLSI",
+    name = "Harmony",
+    groupBy = "Sample"
+)
+
+for(res in seq(0.1,0.4,0.05)){
+  sancm2 <- addClusters(
+    input = sancm2,
+    reducedDims = "Harmony",
+    method = "Seurat",
+    name = paste0("HarmonyClustersRes", res),
+    resolution = res,
+    force = TRUE
+)
+}
+
+sancm2 <- addUMAP(
+    ArchRProj = sancm2, 
+    reducedDims = "Harmony", 
+    name = "UMAPHarmony", 
+    nNeighbors = 30, 
+    minDist = 0.5, 
+    metric = "cosine"
+)
+
+
+p3 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "Sample", embedding = "UMAPHarmony", pal=c("D34_r1_P" = custom_colors$discrete[1], "D34_r2_P" = custom_colors$discrete[2], "D34_r0_P" = custom_colors$discrete[3]))
+plotPDF(p3, name = "Res0.45_SANCM-subclustering-Plot-UMAP2Harmony-Sample-Clusters.pdf", ArchRProj = sancm2, addDOC = FALSE, width = 5, height = 5)
+
+# Count the number of clusters at different resolutions.
+sancm2@cellColData
+
+p0.1 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.1", embedding = "UMAPHarmony")
+p0.15 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.15", embedding = "UMAPHarmony")
+p0.2 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.2", embedding = "UMAPHarmony")
+p0.25 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.25", embedding = "UMAPHarmony")
+p0.3 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.3", embedding = "UMAPHarmony")
+p0.35 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.35", embedding = "UMAPHarmony")
+p0.4 <- plotEmbedding(ArchRProj = sancm2, colorBy = "cellColData", name = "HarmonyClustersRes0.4", embedding = "UMAPHarmony")
+
+plotPDF(p0.1,p0.15,p0.2,p0.25,p0.3,p0.35,p0.4,name = "Res0.45_SAMCM-subclustering-Various_Resolutions_Plot-UMAP2Harmony-Sample-Clusters.pdf", ArchRProj = sancm2, addDOC = FALSE, width = 5, height = 5)
+### output in /Data/iPSC_pacemaker/scATAC/ArchR/ArchRProject
+
+#Visualizing Marker Genes
+markerGenes  <- c(
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5",
+    "NPPA","HAMP","MYH6","CPNE5","BMP4",
+    "MYL7","NR2F2","MYL4"
+  )
+
+#Marker Genes Imputation with MAGIC
+sancm2 <- addImputeWeights(sancm2)
+
+p <- plotEmbedding(
+    ArchRProj = sancm2, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    imputeWeights = getImputeWeights(sancm2)
+)
+
+plotPDF(plotList = p, 
+    name = "Res0.45_SAMCM-subclustering-Canonical-Marker-Genes-W-Imputation.pdf", 
+    ArchRProj = sancm2, 
+    addDOC = FALSE, width = 5, height = 5)
+
+## Note that these plots were saved into folder /Data/iPSC_pacemaker/scATAC/ArchR/ArchRProject/Plots
+
+
+#Create a cluster confusion matrix across each sample
+cM <- confusionMatrix(paste0(sancm2$HarmonyClustersRes0.2), paste0(sancm2$Sample))
+cM
+write.table(cM, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_SANCM_sub-cluster_confusion_matrix_across_each_sample_Res0.2.txt", sep = "\t", quote = FALSE)
+### So only keep the two large clusters (C11, C12, C13) as other clusters are small and contain cells mostly from one sample.
+
+sancm3 <- sancm2[sancm2$HarmonyClustersRes0.2=="C11" | sancm2$HarmonyClustersRes0.2=="C12" | sancm2$HarmonyClustersRes0.2=="C13",]
+
+table(sancm3$HarmonyClustersRes0.2)
+# C11  C12  C13 
+#5473 4037 8036 
+
+sancm3$HarmonyClustersRes0.2[sancm3$HarmonyClustersRes0.2=="C13"]="0"
+sancm3$HarmonyClustersRes0.2[sancm3$HarmonyClustersRes0.2=="C11"]="1"
+sancm3$HarmonyClustersRes0.2[sancm3$HarmonyClustersRes0.2=="C12"]="2"
+
+#### Eight cells are outliers and try to remove it for viewing purpose:
+sancm3@embeddings
+
+sancm3@embeddings$UMAPHarmony
+head(sancm3@embeddings$UMAPHarmony$df)
+
+sancm3@embeddings$UMAPHarmony$df[,2]
+
+head(rev(sort(sancm3@embeddings$UMAPHarmony$df[,2])), n = 10)
+#  [1] 14.561895 14.512722 14.512227 14.512015 14.510815 14.507197 14.504867
+# [8] 14.487182  4.784144  4.759967
+
+tmp <- sancm3@embeddings$UMAPHarmony$df
+names(tmp) <- c("UMAPHarmony1", "UMAPHarmony2")
+tmp1 <- filter(tmp, UMAPHarmony2 < 5)
+
+sancm4 <- sancm3[rownames(tmp1),]
+
+# Try different colors provided by ArchR.
+for(i in 1:length(names(ArchRPalettes))){
+  # Only use the color palettes with enough colors.
+  if(length(ArchRPalettes[[i]]) >= length(unique(sancm4$HarmonyClustersRes0.2))){
+    cus_color = ArchRPalettes[[i]]
+    # Change the color name so it starts from 0 rather than 1.
+    names(cus_color) = as.character(as.numeric(names(cus_color)) - 1)
+    p0.2_filter <- plotEmbedding(ArchRProj = sancm4, colorBy = "cellColData", name = "HarmonyClustersRes0.2", embedding = "UMAPHarmony", plotAs = "points", size = 1, pal = cus_color)
+
+    plotPDF(p0.2_filter, name = paste0("Res0.45_SANCM_sub-cluster_UMAP2Harmony_Res0.2_PostRemoving_filter.", names(ArchRPalettes)[i], ".pdf"), ArchRProj = sancm4, addDOC = FALSE, width = 5, height = 5)
+  }
+}
+
+## Seems the summerNight is the best to use.
+
+#Visualizing Marker Genes
+markerGenes  <- c(
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5"
+  )
+
+#Marker Genes Imputation with MAGIC
+sancm4 <- addImputeWeights(sancm4)
+
+p <- plotEmbedding(
+    ArchRProj = sancm4, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAPHarmony",
+    size = 2,
+    plotAs = "points",
+    imputeWeights = getImputeWeights(sancm4)
+)
+
+plotPDF(plotList = p, 
+    name = "Res0.45_Filtered_SAMCM-subclustering-Canonical-Marker-Genes-W-Imputation.pdf", 
+    ArchRProj = sancm2, 
+    addDOC = FALSE, width = 5, height = 5)
+
+p0.2 <- plotEmbedding(ArchRProj = sancm4, colorBy = "cellColData", name = "HarmonyClustersRes0.2", embedding = "UMAPHarmony", pal = c("0" = paletteer_d("ggthemes::excel_Paper")[1], "1" = paletteer_d("ggthemes::excel_Paper")[2], "2" = paletteer_d("ggthemes::excel_Paper")[3]), size = 2)
+
+plotPDF(p0.2,name = "Res0.45_Filtered_Res0.2_SAMCM-subclustering-Various_Resolutions_Plot-UMAP2Harmony-Sample-Clusters.pdf", ArchRProj = sancm4, addDOC = FALSE, width = 5, height = 5)
+
+## Note that these plots were saved into folder /Data/iPSC_pacemaker/scATAC/ArchR/ArchRProject/Plots
+```
+
+
+Integrative Analysis with ArchR
+```{r}
+getAvailableMatrices(projPacemaker10)
+# calculate co-accessibility
+projPacemaker10 <- addCoAccessibility(
+    ArchRProj = projPacemaker10,
+    reducedDims = "Harmony"
+)
+
+# return the co-accessibility information in the form pf a loop track
+cA <- getCoAccessibility(
+    ArchRProj = projPacemaker10,
+    corCutOff = 0.5,
+    resolution = 1,
+    returnLoops = TRUE
+)
+
+write.table(cA[[1]], "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Co-accessibility_peaks.txt", sep = "\t", quote = F, row.names = F)
+
+# Plotting browser tracks of Co-accessibility
+markerGenes  <- c(
+    "SHOX2","ISL1","TBX18","TBX3","NKX2-5", "HCN4"
+  )
+
+p <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = markerGenes, 
+    upstream = 150000,
+    downstream = 150000,
+    loops = getCoAccessibility(projPacemaker10)
+)
+
+plotPDF(plotList = p, 
+    name = "Res0.45_Plot-Tracks-Marker-Genes-with-CoAccessibility.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 8, height = 5)
+
+# identify peak-to-gene links
+projPacemaker10 <- addPeak2GeneLinks(
+    ArchRProj = projPacemaker10,
+    reducedDims = "Harmony",
+    maxDist = 1500000
+)
+# retrieve these peak-to-gene links
+#p2g <- getPeak2GeneLinks(
+#    ArchRProj = projPacemaker10,
+#    corCutOff = 0.45,
+#    resolution = 1,
+#    returnLoops = FALSE
+#)
+
+p2g <- getPeak2GeneLinks(
+    ArchRProj = projPacemaker10,
+    corCutOff = 0.45,
+    resolution = 1,
+    returnLoops = FALSE
+)
+
+# Prepare for export the peak to gene links with gene names and peak ranges.
+peak2gene <- as.data.frame(p2g)
+
+peak2gene$idxATAC = as.character(peak2gene$idxATAC)
+peak2gene$idxRNA = as.character(peak2gene$idxRNA)
+
+ATAC_peak_index <- as.data.frame(metadata(p2g)[[1]])
+ATAC_peak_index <- mutate(ATAC_peak_index, idx = rownames(ATAC_peak_index))
+
+RNA_peak_index <- as.data.frame(metadata(p2g)[[2]])
+RNA_peak_index <- mutate(RNA_peak_index, idx2 = rownames(RNA_peak_index))
+
+peak2gene_name <- left_join(peak2gene, ATAC_peak_index, by = c("idxATAC" = "idx"))
+
+peak2gene_name <- left_join(peak2gene_name, RNA_peak_index, by = c("idxRNA" = "idx2"))
+
+names(peak2gene_name) = c("idxATAC", "idxRNA", "Correlation", "FDR", "VarQATAC", "VarQRNA", "seqnames.ATAC" ,"start.ATAC", "end.ATAC", "width.ATAC", "strand.ATAC" ,"seqnames.Gene", "start.Gene", "end.Gene", "width.Gene" ,"strand.Gene", "Gene")
+
+peak2gene_name <- select(peak2gene_name, 1:17)
+
+peak2gene_name <- mutate(peak2gene_name, ATAC_peak = paste0(peak2gene_name$seqnames.ATAC, ":", paste0(peak2gene_name$start.ATAC, "-", peak2gene_name$end.ATAC)))
+
+write.table(peak2gene_name, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links.txt", sep = "\t", quote = F, row.names = F)
+write.table(peak2gene_name, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links_2Mb.txt", sep = "\t", quote = F, row.names = F)
+
+genes_peaks_num <- as.data.frame(table(peak2gene_name$Gene))
+genes_peaks_num <- arrange(genes_peaks_num, desc(Freq))
+names(genes_peaks_num) <- c("Gene", "Peak_Num")
+write.table(genes_peaks_num, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_genes_peaks_num.txt", sep = "\t", quote = F, row.names = F)
+
+peaks_genes_num <- as.data.frame(table(peak2gene_name$ATAC_peak))
+peaks_genes_num <- arrange(peaks_genes_num, desc(Freq))
+names(peaks_genes_num) <- c("Peak", "Gene_Num")
+write.table(peaks_genes_num, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_peaks_genes_num.txt", sep = "\t", quote = F, row.names = F)
+
+write.table(as.data.frame(metadata(p2g)[[2]]), "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links_RNAindex.txt", sep = "\t", quote = F, row.names = F)
+write.table(as.data.frame(metadata(p2g)[[1]]), "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links_ATACindex.txt", sep = "\t", quote = F, row.names = F)
+
+p2g_loops <- getPeak2GeneLinks(
+    ArchRProj = projPacemaker10,
+    corCutOff = 0.45,
+    resolution = 1,
+    returnLoops = TRUE
+)
+p2g_loops_name <- as.data.frame(p2g_loops[[1]])
+names(p2g_loops_name) <-c("seqnames","GeneTSS", "PeakCenter", "width", "strand", "value", "FDR")
+
+write.table(p2g_loops_name, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links_loops_format.txt", sep = "\t", quote = F, row.names = F)
+
+# Plotting browser tracks with peak-to-gene links
+peaks <- getMarkers(markersPeaks, cutOff = "FDR <= 0.05 & Log2FC >= 0.5", returnGR = TRUE)
+peaks[["Peakset"]]=getPeakSet(projPacemaker10)
+
+
+cus_color = ArchRPalettes[[1]]
+# Change the color name so it starts from 0 rather than 1.
+names(cus_color) = as.character(as.numeric(names(cus_color)) - 1)
+p1 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = markerGenes, 
+    upstream = 1500000,
+    downstream = 1500000,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  peaks
+)
+#features =  c(getPeakSet(projPacemaker10), getMarkers(markersPeaks, cutOff = "FDR <= 0.1 & Log2FC >= 1", returnGR = TRUE))
+plotPDF(plotList = p1, 
+    name = "Res0.45_Plot-Tracks-Marker-Genes-with-Peak2GeneLinks_2.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+gr_shox2=GRanges(seqnames=c("chr3"), ranges=IRanges(start=c(157650000), end=c(158128182)))
+gr_isl1=GRanges(seqnames=c("chr5"), ranges=IRanges(start=c(51260000), end=c(51490000)))
+gr_tbx18=GRanges(seqnames=c("chr6"), ranges=IRanges(start=c(84500088), end=c(84800603)))
+gr_tbx3=GRanges(seqnames=c("chr12"), ranges=IRanges(start=c(114577185), end=c(116005134)))
+gr_frmd3=GRanges(seqnames=c("chr9"), ranges=IRanges(start=c(83228921), end=c(83600006)))
+gr_tbx20=GRanges(seqnames=c("chr7"), ranges=IRanges(start=c(34899844), end=c(36461440)))
+
+
+frmd3 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_frmd3,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "FRMD3", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(frmd3, 
+    name = "Res0.45_Plot-Tracks-FRMD3-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+frmd3_0.45 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_frmd3,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "FRMD3", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.45),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(frmd3_0.45, 
+    name = "Res0.45_Plot-Tracks-FRMD3-with-Peak2GeneLinks_Cor_0.45.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+tbx20 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx20,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX20", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx20, 
+    name = "Res0.45_Plot-Tracks-TBX20-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+tbx20_0.45 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx20,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX20", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.45),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx20_0.45, 
+    name = "Res0.45_Plot-Tracks-TBX20-with-Peak2GeneLinks_Cor_0.45.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+
+shox2 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_shox2,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "SHOX2", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(shox2, 
+    name = "Res0.45_Plot-Tracks-SHOX2-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+isl1 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_isl1,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "ISL1", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(isl1, 
+    name = "Res0.45_Plot-Tracks-ISL1-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+tbx18 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx18,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX18", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx18, 
+    name = "Res0.45_Plot-Tracks-TBX18-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+tbx3 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx3,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX3", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx3, 
+    name = "Res0.45_Plot-Tracks-TBX3-with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+gr_tbx3_2=GRanges(seqnames=c("chr12"), ranges=IRanges(start=c(115786663), end=c(115800688)))
+tbx3 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx3_2,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX3", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 250,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx3, 
+    name = "Res0.45_Plot-Tracks-TBX3-CloseUp_with-Peak2GeneLinks.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+tbx3 <- plotBrowserTrack(
+    ArchRProj = projPacemaker10, 
+    region = gr_tbx3_2,
+    groupBy = "HarmonyClustersRes0.45", 
+    geneSymbol = "TBX3", 
+    #upstream = 150,
+    #downstream = 150,
+    tileSize = 50,
+    pal = cus_color,
+    loops = getPeak2GeneLinks(projPacemaker10, corCutOff = 0.6),
+    features =  getPeakSet(projPacemaker10)
+)
+
+plotPDF(tbx3, 
+    name = "Res0.45_Plot-Tracks-TBX3-CloseUp_with-Peak2GeneLinks_50bp_tile.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 8)
+
+
+
+# Plotting a heatmap of peak-to-gene links
+p <- plotPeak2GeneHeatmap(ArchRProj = projPacemaker10, groupBy = "HarmonyClustersRes0.45", k = 5)
+plotPDF(p, 
+    name = "Res0.45_Plot-Heatmap-Marker-Genes-with-CoAccessibility_k5.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 10)
+
+plotPDF(p, 
+    name = "Res0.45_Plot-Heatmap-Marker-Genes-with-CoAccessibility_k5.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 10, height = 10)
+
+
+
+
+# Identification of Positive TF-Regulators
+# Obtain MotifMatrix of chromVAR deviations and deviation z-scores for all motifs
+# make sure we have added motif annotations to our ArchRProject
+if("Motif" %ni% names(projPacemaker10@peakAnnotation)){
+    projPacemaker10 <- addMotifAnnotations(ArchRProj = projPacemaker10, motifSet = "cisbp", name = "Motif")
+}
+
+# add a set of background peaks
+projPacemaker10 <- addBgdPeaks(projPacemaker10)
+
+# compute per-cell deviations
+projPacemaker10 <- addDeviationsMatrix(
+  ArchRProj = projPacemaker10, 
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+
+seGroupMotif <- getGroupSE(ArchRProj = projPacemaker10, useMatrix = "MotifMatrix", groupBy = "HarmonyClustersRes0.45")
+# subset this SummarizedExperiment to just the deviation z-scores
+seZ <- seGroupMotif[rowData(seGroupMotif)$seqnames=="z",]
+# identify the maximum delta in z-score between all clusters
+rowData(seZ)$maxDelta <- lapply(seq_len(ncol(seZ)), function(x){
+  rowMaxs(assay(seZ) - assay(seZ)[,x])
+}) %>% Reduce("cbind", .) %>% rowMaxs
+
+#Identify Correlated TF Motifs and TF Gene Score
+corGSM_MM <- correlateMatrices(
+    ArchRProj = projPacemaker10,
+    useMatrix1 = "GeneScoreMatrix",
+    useMatrix2 = "MotifMatrix",
+    reducedDims = "Harmony"
+)
+
+#Identify Correlated TF Motifs and TF Gene Expression
+corGIM_MM <- correlateMatrices(
+    ArchRProj = projPacemaker10,
+    useMatrix1 = "GeneIntegrationMatrix",
+    useMatrix2 = "MotifMatrix",
+    reducedDims = "Harmony"
+)
+
+# Add Maximum Delta Deviation to the Correlation Data Frame
+corGSM_MM$maxDelta <- rowData(seZ)[match(corGSM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+corGIM_MM$maxDelta <- rowData(seZ)[match(corGIM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+
+# Identify Positive TF Regulators
+corGSM_MM <- corGSM_MM[order(abs(corGSM_MM$cor), decreasing = TRUE), ]
+corGSM_MM <- corGSM_MM[which(!duplicated(gsub("\\-.*","",corGSM_MM[,"MotifMatrix_name"]))), ]
+corGSM_MM$TFRegulator <- "NO"
+corGSM_MM$TFRegulator[which(corGSM_MM$cor > 0.5 & corGSM_MM$padj < 0.01 & corGSM_MM$maxDelta > quantile(corGSM_MM$maxDelta, 0.60))] <- "YES"
+sort(corGSM_MM[corGSM_MM$TFRegulator=="YES",1])
+
+write.table(corGSM_MM, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_corGSM_MM.txt", sep = "\t", quote = F, row.names = F)
+
+
+p1 <- ggplot(data.frame(corGSM_MM), aes(cor, maxDelta, color = TFRegulator)) +
+  geom_point() + 
+  theme_ArchR() +
+  geom_vline(xintercept = 0, lty = "dashed") + 
+  scale_color_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Score") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(corGSM_MM$maxDelta)*1.05)
+  )
+
+corGIM_MM <- corGIM_MM[order(abs(corGIM_MM$cor), decreasing = TRUE), ]
+corGIM_MM <- corGIM_MM[which(!duplicated(gsub("\\-.*","",corGIM_MM[,"MotifMatrix_name"]))), ]
+corGIM_MM$TFRegulator <- "NO"
+corGIM_MM$TFRegulator[which(corGIM_MM$cor > 0.5 & corGIM_MM$padj < 0.01 & corGIM_MM$maxDelta > quantile(corGIM_MM$maxDelta, 0.60))] <- "YES"
+sort(corGIM_MM[corGIM_MM$TFRegulator=="YES",1])
+
+write.table(corGIM_MM, "/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_corGIM_MM.txt", sep = "\t", quote = F, row.names = F)
+
+
+p2 <- ggplot(data.frame(corGIM_MM), aes(cor, maxDelta, color = TFRegulator)) +
+  geom_point() + 
+  theme_ArchR() +
+  geom_vline(xintercept = 0, lty = "dashed") + 
+  scale_color_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Expression") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(corGIM_MM$maxDelta)*1.05)
+  )
+
+plotPDF(p1, p2,
+    name = "Res0.45_Plot-Positive-TF-Regulators.pdf", 
+    ArchRProj = projPacemaker10, 
+    addDOC = FALSE, width = 6, height = 10)
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,839 @@
+---
+title: "Pacemaker_ATAC&GWAS"
+output: html_document
+---
+
+Download the GWAS results of heart rate using UKBB data published in paper <<Genetic overlap of chronic obstructive pulmonary disease and cardiovascular disease-related traits: a large-scale genome-wide cross-trait analysis>> from GWAS catalog (https://www.ebi.ac.uk/gwas/publications/30940143; GCST007609; FTP Download):
+http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST007001-GCST008000/GCST007609/
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate
+wget http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST007001-GCST008000/GCST007609/ZhuZ_30940143_ukbb.bolt_460K_selfRepWhite.rhrmean.assoc.gz
+gunzip ZhuZ_30940143_ukbb.bolt_460K_selfRepWhite.rhrmean.assoc.gz
+## The downloaded file is based on hg19.
+cut -d " " -f 1,2,3,11 ZhuZ_30940143_ukbb.bolt_460K_selfRepWhite.rhrmean.assoc > tmp1.bed
+awk '{print $2"\t"$3"\t"$3"\t"$4"\t"$1}' tmp1.bed > tmp2.bed
+
+# Convert to hg38.
+cd /Data/hg19tohg38
+CrossMap.py bed /Data/hg19tohg38/hg19ToHg38.over.chain /Data/iPSC_pacemaker/scATAC/GWAS/tmp2.bed /Data/iPSC_pacemaker/scATAC/GWAS/tmp3.bed
+
+sort -k1,1n -k2,2n tmp3.bed > tmp4.bed
+
+awk '{if($1 == "1" || $1 == "2" || $1 == "3" || $1 == "4" || $1 == "5" || $1 == "6" || $1 == "7" || $1 == "8" || $1 == "9" || $1 == "10" || $1 == "11" || $1 == "12" || $1 == "13" || $1 == "14" || $1 == "15" || $1 == "16" || $1 == "17" || $1 == "18" || $1 == "19" || $1 == "20" || $1 == "21" || $1 == "22"){print $0}}' tmp4.bed > GWAS_hg38.bed
+
+## Download UCSC hg38.refGene.gtf.gz to assign the SNPs to closet genes.
+cd /Data/iPSC_pacemaker/scATAC/GWAS
+wget https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/genes/hg38.refGene.gtf.gz
+gunzip hg38.refGene.gtf.gz
+# format the gtf file.
+awk '{if($3=="transcript"){print $0}}' hg38.refGene.gtf > tmp5.txt
+
+cut -d ";" -f 1,3 tmp5.txt > tmp6.txt
+awk '{gsub(";","\t"); print $0}' tmp6.txt > tmp7.txt
+cut -f 1,4,5,10 tmp7.txt > tmp8.txt
+awk '{gsub("gene_name",""); gsub("\"",""); sub("chr",""); if($1 == "1" || $1 == "2" || $1 == "3" || $1 == "4" || $1 == "5" || $1 == "6" || $1 == "7" || $1 == "8" || $1 == "9" || $1 == "10" || $1 == "11" || $1 == "12" || $1 == "13" || $1 == "14" || $1 == "15" || $1 == "16" || $1 == "17" || $1 == "18" || $1 == "19" || $1 == "20" || $1 == "21" || $1 == "22") {print $0}}' tmp8.txt > tmp9.txt
+sort -k1,1n -k2,2n tmp9.txt > hg38_gene_position.txt
+
+/Data/software/bedtools closest -a GWAS_hg38.bed -b hg38_gene_position.txt -d  -t first > GWAS_hg38_Genes.txt
+/Data/software/bedtools closest -a GWAS_hg38.bed -b ../hg38_gene_position.txt -d  > GWAS_hg38_Genes_All.txt
+# Note that -n does not work for scientific numbers.
+sort -k4,4g GWAS_hg38_Genes_All.txt > P_sorted_GWAS_hg38_Genes_All.txt
+awk '{if($4<5e-08){print $0}}' P_sorted_GWAS_hg38_Genes_All.txt > Sig_P_sorted_GWAS_hg38_Genes_All.txt
+```
+
+Plot manhattan plot for the GWAS results.
+```{r}
+library(qqman)
+library(RColorBrewer)
+library(dplyr)
+setwd("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate")
+de<-read.table("GWAS_hg38_Genes.txt",header=FALSE)
+
+man <- data.frame(SNP = de$V9, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+#pdf("manhattan.pdf",width=22,height=11,useDingbats=FALSE)
+#pdf("manhattan.pdf",width=22,height=11,useDingbats=TRUE)
+png("manhattan.png", width = 880, height = 480)
+#manhattan(man, chr = "CHR", bp = "BP", p = "P",suggestiveline =F, genomewideline =-log10(5e-08),col = brewer.pal(12, "Paired"),chrlabs=c(1:22),cex = 0.6, cex.axis = 0.9, annotatePval = 1e-50, annotateTop = FALSE) 
+manhattan(man, chr = "CHR", bp = "BP", p = "P",suggestiveline =F, genomewideline =-log10(5e-08),col = brewer.pal(12, "Paired"),chrlabs=c(1:22),cex = 1.2, cex.axis = 1.4)
+abline(h=-log10(5e-08),col=1)
+dev.off()
+##write.table(man,"man_tmp.txt",quote=F)
+
+
+########## Plot locus view for FRMD3.
+man <- data.frame(SNP = de$V5, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+# Read in the SNPs in the tail peaks only.
+C1_C4_peaks_snps <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed", header = F)
+pdf("FRMD3_manhattan.pdf")
+manhattan(subset(man, CHR == 9), xlim = c(83228921, 83600006), ylim = c(0, 8), main = "FRMD3: chr9:83,228,921-83,600,006", suggestiveline =F, genomewideline =F, highlight = C1_C4_peaks_snps$V5)
+abline(h=-log10(0.05/6522),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+```
+
+
+Select the SNPs within the combined peaks of C0, C1, C2, C4, C6.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate
+/Data/software/bedtools closest -a GWAS_hg38_Genes.txt -b /Data/iPSC_pacemaker/scATAC/GWAS/ATAC_peaks/Autosome_sorted_X0_X1_X2_X4_X6_peaks_no_header.bed -d  -t first > GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+
+awk '{if($26<1){print $0}}' GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed > Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+wc -l Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+# 218269 Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+
+sort -k4,4g Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed > P_sorted_Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+awk '{if($4<5e-08){print $0}}' P_sorted_Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed > Sig_P_sorted_Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed
+```
+
+Plot manhattan plot for the select GWAS results.
+```{r}
+library(qqman)
+library(RColorBrewer)
+library(dplyr)
+library(paletteer)
+setwd("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate")
+de<-read.table("Extend_0bp_GWAS_hg38_Genes__X0_X1_X2_X4_X6_peaks_no_header.bed",header=FALSE)
+man <- data.frame(SNP = de$V21, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+pdf("Extend_0bp_manhattan.pdf", width = 8, height = 4)
+manhattan(man, chr = "CHR", bp = "BP", p = "P",suggestiveline =F, genomewideline =-log10(5e-08),col = paletteer_d("ggthemes::Classic_Green_Orange_12"), chrlabs=c(1:22),cex = 1.2, cex.axis = 1.4)
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+### Due to the large number of SNPs, the pdf files generated are too big. So decided to randomly chose 10000 SNPs with p-value > 5e-08 but keep all SNPs < 5e-08
+
+man_keep <- filter(man, P < 5e-08)
+man_random <- man %>% filter(P > 5e-08) %>% sample_n(20000)
+man_trim <- rbind(man_keep, man_random)
+man_trim <- arrange(man_trim, CHR, BP)
+
+pdf("Trim_Extend_0bp_manhattan.pdf", width = 8, height = 4)
+manhattan(man_trim, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 5e-20, annotateTop = FALSE, suggestiveline =F, genomewideline =-log10(5e-08),col = paletteer_d("ggthemes::Classic_Green_Orange_12"), chrlabs=c(1:22), cex.axis = 1.4, cex = 1, logp = TRUE)
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+pdf("Trim_Extend_0bp_manhattan_1.pdf", width = 8, height = 4)
+manhattan(man_trim, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = FALSE, annotateTop = FALSE, suggestiveline =F, genomewideline =-log10(5e-08),col = paletteer_d("ggthemes::Classic_Green_Orange_12"), chrlabs=c(1:22), cex.axis = 1.4, cex = 1, logp = TRUE)
+abline(h=-log10(5e-08),col=1)
+dev.off()
+```
+
+
+Select the SNPs in the marker peaks.
+```{bash}
+cd /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate
+
+################ SAN Head C2
+/Data/software/bedtools closest -a GWAS_hg38_Genes.txt -b /Data/iPSC_pacemaker/scATAC/GWAS/Marker_Peaks/sorted_C2MarkPeaks.bed -d  -t first > GWAS_hg38_Genes__C2MarkPeaks.bed
+
+awk '{if($30<1){print $0}}' GWAS_hg38_Genes__C2MarkPeaks.bed > Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed
+wc -l Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed
+#16003 Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed
+
+################ SAN Tail C1+C4 (note that no marker peaks found for C6)
+/Data/software/bedtools closest -a GWAS_hg38_Genes.txt -b /Data/iPSC_pacemaker/scATAC/GWAS/Marker_Peaks/sorted_C1_C4_MarkPeaks.bed -d  -t first > GWAS_hg38_Genes__C1_C4_MarkPeaks.bed
+
+awk '{if($30<1){print $0}}' GWAS_hg38_Genes__C1_C4_MarkPeaks.bed > Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed
+wc -l Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed
+# 11116 Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed
+
+################ SAN Transitional cells C0
+/Data/software/bedtools closest -a GWAS_hg38_Genes.txt -b /Data/iPSC_pacemaker/scATAC/GWAS/Marker_Peaks/sorted_C0MarkPeaks.bed -d  -t first > GWAS_hg38_Genes__C0MarkPeaks.bed
+
+awk '{if($30<1){print $0}}' GWAS_hg38_Genes__C0MarkPeaks.bed > Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed
+wc -l Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed
+#18375 Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed
+```
+
+
+Prune SNPs using LDlinkR for SNPs in Marker peaks.
+```{r}
+library(LDlinkR)
+library(dplyr)
+library(stringr)
+
+################ C0
+C0_peaks_snps <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed", header = F)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+for(i in 3:22){
+#for(i in c(21:22)){
+  chr <- filter(C0_peaks_snps, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(chr$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(chr3$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+thin_snp_list_1 <- filter(thin_snp_list, Details == "Variant kept.")
+thin_snp_list_1 <- distinct(thin_snp_list_1)
+dim(thin_snp_list_1)
+#[1] 9587    4
+write.table(thin_snp_list, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/LDlink_Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed", row.names = F, quote = F, sep = "\t")
+
+
+################ C2
+C2_peaks_snps <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed", header = F)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+for(i in 1:22){
+#for(i in c(21:22)){
+  chr <- filter(C2_peaks_snps, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(chr$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(chr3$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+thin_snp_list_1 <- filter(thin_snp_list, Details == "Variant kept.")
+thin_snp_list_1 <- distinct(thin_snp_list_1)
+dim(thin_snp_list_1)
+#[1] 8488    4
+write.table(thin_snp_list, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/LDlink_Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed", row.names = F, quote = F, sep = "\t")
+
+
+################ C1+C4
+C1_C4_peaks_snps <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed", header = F)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+for(i in 1:22){
+#for(i in c(21:22)){
+  chr <- filter(C1_C4_peaks_snps, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(chr$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(chr1$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(chr2$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(chr3$V5, 
+        pop = "CEU",
+        r2_threshold = "0.1", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+thin_snp_list_1 <- filter(thin_snp_list, Details == "Variant kept.")
+thin_snp_list_1 <- distinct(thin_snp_list_1)
+dim(thin_snp_list_1)
+#[1] 6522    4
+write.table(thin_snp_list, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/LDlink_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed", row.names = F, quote = F, sep = "\t")
+```
+
+
+Plot manhattan plot for the select GWAS results in Marker Peaks using the updated p-value threshold after LD pruning.
+```{r}
+library(qqman)
+library(RColorBrewer)
+library(dplyr)
+library(paletteer)
+setwd("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/")
+
+################################## C0
+de<-read.table("Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed",header=FALSE)
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+man <- data.frame(SNP = de$V9, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+
+pdf("Extend_0bp_manhattan_C0_LD_pruning.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/9587, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,max(-log10(man$P))+1))
+abline(h=-log10(0.05/9587),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+pdf("Extend_0bp_manhattan_C0_LD_pruning_1.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/9587, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,-log10(5e-08)))
+abline(h=-log10(0.05/9587),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+# Filter for the novel genes between 5e-08 and 0.05/9587
+novel_potential <-read.table("Extend_0bp_GWAS_hg38_Genes__C0MarkPeaks.bed",header=FALSE)
+names(novel_potential) <- c("chr", "SNP_position", "SNP_position_2", "Pvalue", "SNP", "chr_2", "Gene_Start", "Gene_End", "Gene", "SNPtoGeneDis", "seqnames", "start", "end", "width", "strand", "score", "replicateScoreQuantile", "groupScoreQuantile", "Reproducibility", "GroupReplicate", "distToGeneStart", "nearestGene", "peakType", "distToTSS", "nearestTSS", "GC", "idx", "N", "Peak", "Distance")
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+novel_potential <- filter(novel_potential, Pvalue < 0.05/9587 & Pvalue > 5e-08)
+
+all <-read.table("P_sorted_GWAS_hg38_Genes_All.txt",header=FALSE)
+filter_all <- data.frame(SNP = all$V5, GENE = all$V9, CHR=as.numeric(all$V1), BP=all$V2, P=all$V4)
+filter_all <- filter(filter_all, P < 5e-08)
+
+novel <- filter(novel_potential, ! Gene %in% filter_all$GENE)
+
+unique(novel_potential$Gene)
+unique(novel$Gene)
+# [1] "GNG12-AS1" "RAP1A"     "OVAAL"     "DENND1B"   "SLC30A3"   "HEATR5B"  
+# [7] "CX3CR1"    "LOC440982" "HTR4"      "MTCH1"     "BVES"      "KCNH2"    
+#[13] "PRKAG2"    "CNTLN"     "FAM222A"   "FOXO1"     "STK24"     "PCCA"     
+#[19] "MAPK1IP1L" "ATG14"     "MAPK8IP3"  "HPR"       "ZFPM1"     "BAHCC1"   
+#[25] "DIP2A"
+write.table(novel, "Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C0_MarkPeaks.txt", sep = "\t", quote = F)
+
+################################## C2
+de<-read.table("Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed",header=FALSE)
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+man <- data.frame(SNP = de$V9, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+
+pdf("Extend_0bp_manhattan_C2_LD_pruning.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/8488, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,max(-log10(man$P))+1))
+abline(h=-log10(0.05/8488),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+pdf("Extend_0bp_manhattan_C2_LD_pruning_1.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/8488, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,-log10(5e-08)))
+abline(h=-log10(0.05/8488),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+# Filter for the novel genes between 5e-08 and 0.05/8488
+novel_potential <-read.table("Extend_0bp_GWAS_hg38_Genes__C2MarkPeaks.bed",header=FALSE)
+names(novel_potential) <- c("chr", "SNP_position", "SNP_position_2", "Pvalue", "SNP", "chr_2", "Gene_Start", "Gene_End", "Gene", "SNPtoGeneDis", "seqnames", "start", "end", "width", "strand", "score", "replicateScoreQuantile", "groupScoreQuantile", "Reproducibility", "GroupReplicate", "distToGeneStart", "nearestGene", "peakType", "distToTSS", "nearestTSS", "GC", "idx", "N", "Peak", "Distance")
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+novel_potential <- filter(novel_potential, Pvalue < 0.05/8488 & Pvalue > 5e-08)
+novel <- filter(novel_potential, ! Gene %in% filter_all$GENE)
+unique(novel_potential$Gene)
+unique(novel$Gene)
+# [1] "COL16A1"      "GNG12-AS1"    "BCAR3"        "GRM7"         "NR1D2"       
+# [6] "ITGA9"        "HTR4"         "LINC01947"    "GMDS"         "FANCE"       
+#[11] "LOC102724152" "KLHL38"       "FRMD3"        "FGFR2"        "JAM3"        
+#[16] "PCCA"         "FBXO34"       "FUT8"         "DYNC1H1"      "FBN1"        
+#[21] "TMOD2"        "CA12"         "RAI1"         "MIR924HG"     "KCNE2"   
+write.table(novel, "Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C2_MarkPeaks.txt", sep = "\t", quote = F)
+
+
+################################## C1+C4
+de<-read.table("Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed",header=FALSE)
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+man <- data.frame(SNP = de$V9, CHR=as.numeric(de$V1), BP=de$V2, P=de$V4)
+
+pdf("Extend_0bp_manhattan_C1_C4_LD_pruning.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/6522, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,max(-log10(man$P))+1))
+abline(h=-log10(0.05/6522),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+pdf("Extend_0bp_manhattan_C1_C4_LD_pruning_1.pdf", width = 12, height = 6)
+manhattan(man, chr = "CHR", bp = "BP", p = "P", snp = "SNP", annotatePval = 0.05/6522, annotateTop = FALSE, suggestiveline =F, genomewideline =F,col = paletteer_d("ggthemes::Classic_Green_Orange_12"),chrlabs=c(1:22),cex = 1, cex.axis = 1.8, ylim=c(0,-log10(5e-08)))
+abline(h=-log10(0.05/6522),col="darkred")
+abline(h=-log10(5e-08),col=1)
+dev.off()
+
+# Filter for the novel genes between 5e-08 and 0.05/6522
+novel_potential <-read.table("Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed",header=FALSE)
+names(novel_potential) <- c("chr", "SNP_position", "SNP_position_2", "Pvalue", "SNP", "chr_2", "Gene_Start", "Gene_End", "Gene", "SNPtoGeneDis", "seqnames", "start", "end", "width", "strand", "score", "replicateScoreQuantile", "groupScoreQuantile", "Reproducibility", "GroupReplicate", "distToGeneStart", "nearestGene", "peakType", "distToTSS", "nearestTSS", "GC", "idx", "N", "Peak", "Distance")
+# Column names: chr	SNP_position	SNP_position	Pvalue	SNP	chr	Gene_Start	Gene_End	Gene	SNPtoGeneDis	seqnames	start	end	width	strand	score	replicateScoreQuantile	groupScoreQuantile	Reproducibility	GroupReplicate	distToGeneStart	nearestGene	peakType	distToTSS	nearestTSS	GC	idx	N	Peak	Distance
+novel_potential <- filter(novel_potential, Pvalue < 0.05/6522 & Pvalue > 5e-08)
+novel <- filter(novel_potential, ! Gene %in% filter_all$GENE)
+unique(novel_potential$Gene)
+unique(novel$Gene)
+# [1] "LINC01715"    "RAP1A"        "RABGAP1L-DT"  "COQ8A"        "HEATR1"      
+# [6] "CRIM1"        "USP39"        "TBC1D8-AS1"   "GPD2"         "CSRNP1"      
+#[11] "LOC101928978" "FNIP2"        "XRCC4"        "NDFIP1"       "LOC101928663"
+#[16] "KCNH2"        "NKX2-6"       "KLHL38"       "FRMD3"        "PARP11"      
+#[21] "TMBIM6"       "FAM222A"      "SLITRK6"      "FBXO34"       "ATXN3"       
+#[26] "PAK4"         "BCAM"
+write.table(novel, "Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.txt", sep = "\t", quote = F)
+```
+
+
+Check if the SNPs for the novel genes are in high LD (R2 > 0.8) with SNPs with p-value < 5e-08
+```{r}
+library(LDlinkR)
+library(dplyr)
+library(stringr)
+setwd("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/")
+
+# Read in all significant SNPs.
+sigSNPs <- read.table("Sig_P_sorted_GWAS_hg38_Genes_All.txt")
+sigSNPs <- arrange(sigSNPs, V1, V2)
+
+################################# C0
+C0_novel <- read.table("Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C0_MarkPeaks.txt", sep = "\t", header = T)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+#for(i in 1:22){
+for(i in c(1:22)){
+  novel <- filter(C0_novel, chr == i)
+  if(dim(novel)[1]<1) {next}
+  chr <- filter(sigSNPs, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(c(chr$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(c(chr3$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+C0_novel_prune <- left_join(C0_novel, thin_snp_list, by = c("SNP" = "RS_Number"))
+C0_novel_prune <- distinct(C0_novel_prune)
+write.table(C0_novel_prune, "C0_novel_prune.txt", quote = F, sep = "\t")
+write.table(thin_snp_list, "C0_novel_Details.txt", quote = F, sep = "\t")
+C0_novel_prune <- filter(C0_novel_prune, Details == "Variant kept.")
+unique(C0_novel_prune$Gene)
+# [1] "GNG12-AS1" "RAP1A"     "OVAAL"     "DENND1B"   "SLC30A3"   "HEATR5B"  
+# [7] "CX3CR1"    "LOC440982" "HTR4"      "MTCH1"     "BVES"      "KCNH2"    
+#[13] "PRKAG2"    "CNTLN"     "FAM222A"   "FOXO1"     "STK24"     "PCCA"     
+#[19] "MAPK1IP1L" "ATG14"     "MAPK8IP3"  "HPR"       "ZFPM1"     "BAHCC1"   
+#[25] "DIP2A"
+######## Turns out all the genes were independent novel loci.
+
+
+################################# C2
+C2_novel <- read.table("Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C2_MarkPeaks.txt", sep = "\t", header = T)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+#for(i in 1:22){
+for(i in c(1:22)){
+  novel <- filter(C2_novel, chr == i)
+  if(dim(novel)[1]<1) {next}
+  chr <- filter(sigSNPs, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(c(chr$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(c(chr3$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+C2_novel_prune <- left_join(C2_novel, thin_snp_list, by = c("SNP" = "RS_Number"))
+C2_novel_prune <- distinct(C2_novel_prune)
+write.table(C2_novel_prune, "C2_novel_prune.txt", quote = F, sep = "\t")
+write.table(thin_snp_list, "C2_novel_Details.txt", quote = F, sep = "\t")
+C2_novel_prune <- filter(C2_novel_prune, Details == "Variant kept.")
+unique(C2_novel_prune$Gene)
+# [1] "COL16A1"      "GNG12-AS1"    "BCAR3"        "GRM7"         "NR1D2"       
+# [6] "ITGA9"        "HTR4"         "LINC01947"    "GMDS"         "FANCE"       
+#[11] "LOC102724152" "KLHL38"       "FRMD3"        "FGFR2"        "JAM3"        
+#[16] "PCCA"         "FBXO34"       "FUT8"         "DYNC1H1"      "FBN1"        
+#[21] "TMOD2"        "CA12"         "RAI1"         "MIR924HG"     "KCNE2"
+### No gene was removed.
+
+################################# C1+C4
+C1_C4_novel <- read.table("Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.txt", sep = "\t", header = T)
+thin_snp_list <- data.frame(RS_Number=c(), Position=c(), Alleles = c(), Details = c())
+#for(i in 1:22){
+for(i in c(1:22)){
+  novel <- filter(C1_C4_novel, chr == i)
+  if(dim(novel)[1]<1) {next}
+  chr <- filter(sigSNPs, V1 == i)
+  chr <- filter(chr, str_detect(V5, "^rs"))
+  if(dim(chr)[1]>=2 & dim(chr)[1]<5000){
+    tmp <- SNPclip(c(chr$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp)
+  }
+  if(dim(chr)[1]>=5000 & dim(chr)[1] < 9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+  }
+  if(dim(chr)[1]>=9700){
+    chr1 <- chr[1:4900,]
+    chr2 <- chr[4901:9700,]
+    chr3 <- chr[9701:dim(chr)[1],]
+    tmp1 <- SNPclip(c(chr1$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp2 <- SNPclip(c(chr2$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    tmp3 <- SNPclip(c(chr3$V5,novel$SNP), 
+        pop = "CEU",
+        r2_threshold = "0.8", 
+        maf_threshold = "0.01", 
+        token = "07d3787122f3", 
+        file = FALSE,
+        genome_build = "grch38"
+    )
+    thin_snp_list <- rbind(thin_snp_list, tmp1)
+    thin_snp_list <- rbind(thin_snp_list, tmp2)
+    thin_snp_list <- rbind(thin_snp_list, tmp3)
+  }  
+}
+
+C1_C4_novel_prune <- left_join(C1_C4_novel, thin_snp_list, by = c("SNP" = "RS_Number"))
+C1_C4_novel_prune <- distinct(C1_C4_novel_prune)
+write.table(C1_C4_novel_prune, "C1_C4_novel_prune.txt", quote = F, sep = "\t")
+write.table(thin_snp_list, "C1_C4_novel_Details.txt", quote = F, sep = "\t")
+C1_C4_novel_prune <- filter(C1_C4_novel_prune, Details == "Variant kept.")
+unique(C1_C4_novel_prune$Gene)
+# [1] "LINC01715"    "RAP1A"        "RABGAP1L-DT"  "COQ8A"        "HEATR1"      
+# [6] "CRIM1"        "USP39"        "TBC1D8-AS1"   "GPD2"         "CSRNP1"      
+#[11] "LOC101928978" "XRCC4"        "NDFIP1"       "LOC101928663" "KCNH2"       
+#[16] "NKX2-6"       "KLHL38"       "FRMD3"        "PARP11"       "FAM222A"     
+#[21] "SLITRK6"      "FBXO34"       "ATXN3"        "PAK4"         "BCAM"
+# TMBIM6 and FNIP2 were removed. 
+# These genes are not associated with resting heart rate in GWAS catalog.
+### These genes have peak to gene links.
+COQ8A
+HEATR1
+PARP11
+FAM222A
+FBXO34
+BCAM
+CRIM1
+CSRNP1
+XRCC4
+NDFIP1
+KCNH2
+FRMD3
+
+```
+
+
+Check if the SNPs within marker peaks of SAN tail cells and with p-value between 5e-08 and 0.05/6522 are within peaks which can be linked to genes.
+```{r}
+# Read in the snps info.
+snps <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.txt", header = T)
+# Format to bed file and export file for bedtools to use.
+write.table(snps, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed", quote = F, sep = "\t", row.names = F, col.names = F)
+
+# Read in peak2gene links.
+peak2gene <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/ArchRProject/Res0.45_Peak-to-Gene-links_2Mb.txt", header = T)
+# Format to bed file and export file for bedtools to use.
+peak2gene_format <- select(peak2gene, seqnames.ATAC, start.ATAC,  end.ATAC, everything())
+peak2gene_format$seqnames.ATAC = gsub("chr", "", peak2gene_format$seqnames.ATAC)
+write.table(peak2gene_format, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Res0.45_Peak-to-Gene-links_2Mb.bed", quote = F, sep = "\t", row.names = F, col.names = F)
+#peakset <- read.table("/Data/iPSC_pacemaker/scATAC/ArchR/Second_Round/Save-projPacemaker10/Peakset.txt", header = T)
+#peakset <- mutate(peakset, Peak = paste0(seqnames, ":",  start, "-", end))
+#table(snps$Peak %in% peak2gene$ATAC_peak)
+#table(snps$Peak %in% peakset$Peak)
+#table(peak2gene$ATAC_peak %in% peakset$Peak)
+```
+
+```{bash}
+/Data/software/bedtools intersect -a /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks.bed -b /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Res0.45_Peak-to-Gene-links_2Mb.bed -wa -wb > /Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks_In_Peak2Gene_Links.bed
+```
+
+```{r}
+snps_in_peak2gene <- read.table("/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks_In_Peak2Gene_Links.bed")
+names(snps_in_peak2gene) <- c(names(snps), names(peak2gene_format))
+write.table(snps_in_peak2gene, "/Data/iPSC_pacemaker/scATAC/GWAS/GWAS_HeartRate/Novel_Genes_Extend_0bp_GWAS_hg38_Genes__C1_C4_MarkPeaks_In_Peak2Gene_Links.txt", quote = F, row.names = F, sep = "\t")
+```
+
+
+
