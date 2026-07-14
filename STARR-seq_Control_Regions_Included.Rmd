@@ -1,0 +1,854 @@
+---
+title: "STARR-seq Control regions included"
+output: html_document
+date: "2024-10-31"
+---
+
+Early analysis did not include the one positive and five negative regions. This is the updated analysis.
+
+By checking the bam files in IGV, there was no sequencing reads at all for the only positive region included. Below is James' reply:
+I had a feeling that this might happen, after finishing the experiments and prepping the sequencing library it donned on me that the ISE (ISL1 enhancer) I used was 1.5 kb. This was used because it was previously cloned into the STARR seq vector and tested (with positive expression by qPCR when transfected alone) by previous lab members and to my knowledge a shorter 500 bp ISE was not generated or tested. Given the ISE sequence wasn't even detected in the input sample and the length was much longer my guess would be that the ISE fragment was not efficiently amplified and/or lost in the purification/library prep (size selection steps) as these are geared towards 500 bp fragments. I'm glad to see the negative controls worked!
+
+So the analysis next only included the 5 negative regions along with the target regions.
+
+Calculate the coverage for each target region.
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bedtools/
+for file in Filter_*_pc_per_base.txt
+do
+awk '{print $1"\t"$2"\t"$2"\t"$3}' $file | 
+/gau/isilon/int/xzhang/software/bedtools intersect -a stdin -b /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/STARR_Target_Regions_Controls_Regions_Included.bed -wa -wb > /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_$file
+done
+```
+
+Note that there are two overlapping target regions:
+chr7	100879691	100880191
+chr7	100879727	100880227
+To count the number of off-target and on-target coverage, generate separate bed for this purpose so the overlapping regions won't be double counted.
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bedtools/
+for file in Filter_*_pc_per_base.txt
+do
+awk '{print $1"\t"$2"\t"$2"\t"$3}' $file | 
+/gau/isilon/int/xzhang/software/bedtools intersect -a stdin -b /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/STARR_Target_Regions_Controls_Regions_Included.bed -u > /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Unique_Target_$file
+done
+
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/
+for file in Unique_Target*_pc_per_base.txt
+do
+echo $file
+awk '{sum += $4} END {print sum}' ${file}
+done
+rm Unique*
+
+### Count all the bps.
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bedtools
+for file in Filter*_pc_per_base.txt
+do
+echo $file
+awk '{sum += $3} END {print sum}' ${file}
+done
+```
+
+This is to double check the input on-target bases vs. all bases.
+```{r}
+target_input <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bedtools/Filter_sorted_JE_input_aln-pe.bam_pc_per_base.txt", sep = "\t")
+target_input <- mutate(target_input, Pos = paste0(V1,":", V2))
+
+tmp <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.txt", sep = "\t")
+tmp <- mutate(tmp, Pos = paste0(V1,":", V2))
+
+length(intersect(tmp$Pos, target_input$Pos))
+length(setdiff(target_input$Pos, tmp$Pos))
+
+tmp$Pos[!tmp$Pos %in% target_input$Pos]
+```
+
+
+Normalize the read depth using CPM.
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/
+for file in Target*_pc_per_base.txt
+do
+echo $file
+awk '{sum += $4} END {print sum}' ${file}
+done
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/4740188545/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE211101_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE211101_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE211101_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE211101_aln-pe.bam_pc_per_base.bedgraph
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/5956659074/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE211121_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE211121_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE211121_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE211121_aln-pe.bam_pc_per_base.bedgraph
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/6404059844/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE240314_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE240314_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE240314_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE240314_aln-pe.bam_pc_per_base.bedgraph
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/5738210845/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE240325_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE240325_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE240325_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE240325_aln-pe.bam_pc_per_base.bedgraph
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/7254690869/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE240404_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE240404_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE240404_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE240404_aln-pe.bam_pc_per_base.bedgraph
+
+awk '{print $1"\t"$2"\t"$3"\t"($4*1000000/5507508027/500)"\t"$5"\t"$6"\t"$7}' Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.txt > CPM_Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.bed
+/gau/isilon/int/xzhang/software/bedtools merge -i CPM_Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.bed -d 1 -c 4 -o sum > CPM_Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.bedgraph
+```
+
+Sum up the reads for each target region and normalize the read depth.
+```{r}
+library(dplyr)
+## Read in target regions.
+target <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/STARR_Target_Regions_Controls_Regions_Included.bed", sep = "\t", header = F)
+target <- select(target, 1:3)
+target <- mutate(target, Fragment = paste0(V1,":",V2,"_",V3))
+
+
+## Replicate JE_input
+JE_input <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE_input_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE_input <- mutate(JE_input, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE_input$Fragment))
+JE_input <- JE_input %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE_input <- mutate(JE_input, CPM = Depth * 1e6 / sum(JE_input$Depth) )
+JE_input <- left_join(target, JE_input, by = "Fragment")
+JE_input$Depth[is.na(JE_input$Depth)] = 0
+JE_input$CPM[is.na(JE_input$CPM)] = 0
+
+## Replicate JE211101
+JE211101 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE211101_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE211101 <- mutate(JE211101, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE211101$Fragment))
+JE211101 <- JE211101 %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE211101 <- mutate(JE211101, CPM = Depth * 1e6 / sum(JE211101$Depth) )
+JE211101 <- left_join(target, JE211101, by = "Fragment")
+JE211101$Depth[is.na(JE211101$Depth)] = 0
+JE211101$CPM[is.na(JE211101$CPM)] = 0
+
+## Replicate JE211121
+JE211121 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE211121_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE211121 <- mutate(JE211121, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE211121$Fragment))
+JE211121 <- JE211121 %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE211121 <- mutate(JE211121, CPM = Depth * 1e6 / sum(JE211121$Depth) )
+JE211121 <- left_join(target, JE211121, by = "Fragment")
+JE211121$Depth[is.na(JE211121$Depth)] = 0
+JE211121$CPM[is.na(JE211121$CPM)] = 0
+
+## Replicate JE240314
+JE240314 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE240314_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE240314 <- mutate(JE240314, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE240314$Fragment))
+JE240314 <- JE240314 %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE240314 <- mutate(JE240314, CPM = Depth * 1e6 / sum(JE240314$Depth) )
+JE240314 <- left_join(target, JE240314, by = "Fragment")
+JE240314$Depth[is.na(JE240314$Depth)] = 0
+JE240314$CPM[is.na(JE240314$CPM)] = 0
+
+## Replicate JE240325
+JE240325 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE240325_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE240325 <- mutate(JE240325, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE240325$Fragment))
+JE240325 <- JE240325 %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE240325 <- mutate(JE240325, CPM = Depth * 1e6 / sum(JE240325$Depth) )
+JE240325 <- left_join(target, JE240325, by = "Fragment")
+JE240325$Depth[is.na(JE240325$Depth)] = 0
+JE240325$CPM[is.na(JE240325$CPM)] = 0
+
+## Replicate JE240404
+JE240404 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Target_Filter_sorted_JE240404_aln-pe.bam_pc_per_base.txt", sep = "\t", header = F)
+JE240404 <- mutate(JE240404, Fragment = paste0(V5,":",V6,"_",V7))
+length(unique(JE240404$Fragment))
+JE240404 <- JE240404 %>% 
+  group_by(Fragment) %>% 
+  summarise(Depth = sum(V4))
+JE240404 <- mutate(JE240404, CPM = Depth * 1e6 / sum(JE240404$Depth) )
+JE240404 <- left_join(target, JE240404, by = "Fragment")
+JE240404$Depth[is.na(JE240404$Depth)] = 0
+JE240404$CPM[is.na(JE240404$CPM)] = 0
+```
+
+Calculate the log2 of each replicate vs input for each target region after adding pseudocount 1.
+```{r}
+table(JE211101$Fragment==JE_input$Fragment)
+names(JE211101) <- c("Chr", "Start", "End", "Fragment", "Depth_JE211101", "CPM_JE211101")
+JE211101 <- mutate(JE211101, Log2FC_JE211101 = log2((JE211101$CPM_JE211101+1)/(JE_input$CPM+1)))
+
+table(JE211121$Fragment==JE_input$Fragment)
+names(JE211121) <- c("Chr", "Start", "End", "Fragment", "Depth_JE211121", "CPM_JE211121")
+JE211121 <- mutate(JE211121, Log2FC_JE211121 = log2((JE211121$CPM_JE211121+1)/(JE_input$CPM+1)))
+
+table(JE240314$Fragment==JE_input$Fragment)
+names(JE240314) <- c("Chr", "Start", "End", "Fragment", "Depth_JE240314", "CPM_JE240314")
+JE240314 <- mutate(JE240314, Log2FC_JE240314 = log2((JE240314$CPM_JE240314+1)/(JE_input$CPM+1)))
+
+table(JE240325$Fragment==JE_input$Fragment)
+names(JE240325) <- c("Chr", "Start", "End", "Fragment", "Depth_JE240325", "CPM_JE240325")
+JE240325 <- mutate(JE240325, Log2FC_JE240325 = log2((JE240325$CPM_JE240325+1)/(JE_input$CPM+1)))
+
+table(JE240404$Fragment==JE_input$Fragment)
+names(JE240404) <- c("Chr", "Start", "End", "Fragment", "Depth_JE240404", "CPM_JE240404")
+JE240404 <- mutate(JE240404, Log2FC_JE240404 = log2((JE240404$CPM_JE240404+1)/(JE_input$CPM+1)))
+
+names(JE_input) <- c("Chr", "Start", "End", "Fragment", "Depth_Input", "CPM_Input")
+results <- cbind(JE_input, JE211101[,5:7], JE211121[,5:7], JE240314[,5:7], JE240325[,5:7], JE240404[,5:7])
+
+results$Rank_JE211101 <- rank(-results$Log2FC_JE211101)
+results$Rank_JE211121 <- rank(-results$Log2FC_JE211121)
+results$Rank_JE240314 <- rank(-results$Log2FC_JE240314)
+results$Rank_JE240325 <- rank(-results$Log2FC_JE240325)
+results$Rank_JE240404 <- rank(-results$Log2FC_JE240404)
+
+results <- mutate(results, Ave_Log2FC = (Log2FC_JE211101+Log2FC_JE211121+Log2FC_JE240314+Log2FC_JE240325+Log2FC_JE240404)/5, Ave_Rank = (Rank_JE211101+Rank_JE211121+Rank_JE240314+Rank_JE240325+Rank_JE240404)/5)
+
+write.table(distinct(results), "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Log2FC.txt", sep = "\t", quote = F, row.names = F)
+```
+
+Add all the info to the results.
+```{r}
+library(readxl)
+library(writexl)
+
+RHR <- read_excel("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Resting_HR_STARR-seq_sequences.xlsx", sheet = 1)
+RHR <- mutate(RHR, Trait = "RHR")
+RHR <- dplyr::select(RHR, 1:20, 23, 21, 24, 22, 25:47)
+names(RHR)[17:18] <- c("Minus_log10_p.value", "Max_Minus_log10_p.value")
+
+AFIB <- read_excel("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/AFib_STARR-seq_sequences.xlsx", sheet = 1)
+AFIB <- mutate(AFIB, Trait = "AFIB")
+
+HRR <- read_excel("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/HR_Recovery_STARR-seq_sequences.xlsx", sheet = 1)
+HRR <- mutate(HRR, Trait = "HRR")
+
+info <- rbind(RHR, AFIB, HRR)
+
+info <- mutate(info, Fragment = paste0(Extract_Chr,":",Extract_Start,"_",Extract_End))
+info$Duplicate <- duplicated(info$Fragment)
+
+write_xlsx(info, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Info.xlsx")
+
+results_info <- left_join(distinct(results), info, by ="Fragment")
+write_xlsx(results_info, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/results_info.xlsx")
+```
+
+Calculate the correlation of CPM between samples.
+```{r}
+library(corrplot)
+cpm <- select(results, 4, 6, 8, 11, 14, 17, 20)
+M = cor(cpm[,-1])
+pdf("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/CMP_Cor.pdf")
+corrplot(M, col = COL1('Oranges', 100), col.lim = c(0, 1), addCoef.col = 'white', tl.col = 'black', tl.srt = 45, diag=FALSE)
+dev.off()
+
+log2 <- select(results, 4, 9, 12, 15, 18, 21, 27)
+M = cor(log2[,-1])
+pdf("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Log2_Cor.pdf")
+corrplot(M, col = COL1('Greens', 100), col.lim = c(0.96, 1), addCoef.col = 'white', tl.col = 'black', tl.srt = 45, diag=FALSE, is.corr = FALSE)
+dev.off()
+```
+
+Plot ridgeline plot.
+```{r}
+log2 <- select(results, 4, 9, 12, 15, 18, 21, 27)
+log2 <- arrange(log2, desc(Ave_Log2FC))
+log2$Order = 1:nrow(log2)
+library(ggridges)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+## add the control region annotation.
+target <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/STARR_Target_Regions_Controls_Regions_Included.bed", sep = "\t", header = F)
+target <- mutate(target, Fragment = paste0(V1,":",V2,"_",V3))
+target <- select(target, Fragment, V4)
+names(target)[2] <- "Regions"
+log2 <- left_join(log2, target, by = "Fragment")
+
+write_xlsx(log2, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/results_info_regions.xlsx")
+
+ave_plot <- ggplot(log2[,c("Order","Ave_Log2FC")], aes(x=Order, y=Ave_Log2FC)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Ave_Log2FC), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) + scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+JE211101_plot <- ggplot(log2[,c("Order","Log2FC_JE211101")], aes(x=Order, y=Log2FC_JE211101)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Log2FC_JE211101), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) + scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+JE211121_plot <- ggplot(log2[,c("Order","Log2FC_JE211121")], aes(x=Order, y=Log2FC_JE211121)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Log2FC_JE211121), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())+ scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+JE240314_plot <- ggplot(log2[,c("Order","Log2FC_JE240314")], aes(x=Order, y=Log2FC_JE240314)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Log2FC_JE240314), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())+ scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+JE240325_plot <- ggplot(log2[,c("Order","Log2FC_JE240325")], aes(x=Order, y=Log2FC_JE240325)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Log2FC_JE240325), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())+ scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+JE240404_plot <- ggplot(log2[,c("Order","Log2FC_JE240404")], aes(x=Order, y=Log2FC_JE240404)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=Log2FC_JE240404), color="grey") +
+  geom_point( aes(color=factor(log2$Regions)), size=1) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("") +
+  ylab("Log2FC") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5))+ scale_color_manual(values=c("black", "orange")) + theme(legend.position = "none")
+
+ggarrange(ave_plot + rremove("x.text"), JE211101_plot + rremove("x.text"), JE211121_plot + rremove("x.text"), JE240314_plot + rremove("x.text"), JE240325_plot + rremove("x.text"), JE240404_plot,  
+          labels = c("Average", "JE211101", "JE211121", "JE240314", "JE240325", "JE240404"),
+          ncol = 1, nrow = 6, heights = c(1, 1, 1, 1, 1, 1))
+ggsave("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Log2_Track.pdf", height = 10, width = 20)
+```
+
+Generates a coverage track (bigWig or bedGraph) using deepTools' bamCoverage to cross-check the results.
+```{bash}
+cd /home/xzhang08
+source ~/miniconda3/bin/activate
+conda activate deepTools
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA
+
+## index the bam first
+for file in Filter*bam
+do
+/gau/isilon/int/xzhang/software/samtools-1.20/samtools index $file
+done
+
+### Test which options are the best using one sample.
+bamCoverage --bam Filter_sorted_JE211101_aln-pe.bam -o deepTools/Filter_sorted_JE211101_aln-pe_bamCoverage.bw \
+    --binSize 1 \
+    --normalizeUsing CPM \
+    --extendReads
+    
+bamCoverage --bam Filter_sorted_JE211101_aln-pe.bam -o deepTools/Filter_sorted_JE211101_aln-pe_bamCoverage_no_extension.bw \
+    --binSize 1 \
+    --normalizeUsing CPM
+    
+bamCoverage --bam Filter_sorted_JE211101_aln-pe.bam -o deepTools/Filter_sorted_JE211101_aln-pe_bamCoverage_binsize10.bw \
+    --binSize 10 \
+    --normalizeUsing CPM \
+    --extendReads
+    
+    
+bamCoverage --bam Filter_sorted_JE211101_aln-pe.bam -o deepTools/Filter_sorted_JE211101_aln-pe_bamCoverage_binsize10_noextenstion.bw \
+    --binSize 10 \
+    --normalizeUsing CPM
+    
+### It appears that --extendReads should be used, but somehow there is some reads outside of the target region boundaries.
+#### Run all samples.
+for file in Filter_sorted*.bam
+do
+bamCoverage --bam $file -of bedgraph -o deepTools/${file}_bamCoverage.bedgraph \
+    --binSize 1 \
+    --normalizeUsing CPM \
+    --extendReads
+done
+```
+
+Compare each replicate with input sample using bamCompare to cross-check the results.
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA
+bamCompare -b1 Filter_sorted_JE211101_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph --extendReads -o deepTools/JE211101_log2ratio.bedgraph
+
+bamCompare -b1 Filter_sorted_JE211101_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph -o deepTools/JE211101_log2ratio_noextension.bedgraph
+
+bamCompare -b1 Filter_sorted_JE211121_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph -o deepTools/JJE211121_log2ratio_noextension.bedgraph
+
+bamCompare -b1 Filter_sorted_JE240314_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph -o deepTools/JE240314_log2ratio_noextension.bedgraph
+
+bamCompare -b1 Filter_sorted_JE240325_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph -o deepTools/JE240325_log2ratio_noextension.bedgraph
+
+bamCompare -b1 Filter_sorted_JE240404_aln-pe.bam -b2 Filter_sorted_JE_input_aln-pe.bam -of bedgraph -o deepTools/JE240404_log2ratio_noextension.bedgraph
+
+##### Only retain the target regions.
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/deepTools
+for file in *_log2ratio_noextension.bedgraph
+do
+/gau/isilon/int/xzhang/software/bedtools intersect -a $file -b /gau/isilon/int/xzhang/Pacemaker/STARR_seq/STARR_Target_Regions.bed -wa -f 0.50 > Target_$file
+done
+```
+
+
+Call variants
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE211101_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE211101.bcf
+
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE211121_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE211121.bcf
+
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE240314_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE240314.bcf
+
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE240325_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE240325.bcf
+
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE240404_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE240404.bcf
+
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools mpileup --max-depth 3442700 -Ou -f /gau/isilon/int/xzhang/Pacemaker/ISL1_ChIP_seq/refdata-cellranger-arc-GRCh38-2020-A-2.0.0/fasta/genome.fa Filter_sorted_JE_input_aln-pe.bam | /gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools call -mv -Ob -o bcftools/JE_input.bcf
+```
+
+Convert bcf to vcf and extract the counts for each allele of the SNPs.
+```{bash}
+cd /gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools
+for file in *bcf
+do
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools view ${file} -O v -o ${file}.vcf
+done
+
+for file in *vcf
+do
+/gau/isilon/int/xzhang/software/bcftools-1.21/bin/bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t [%AD]\n' $file | awk '{gsub(/,/, "\t"); print}' > Allele_Count_${file}
+done
+```
+
+Perform Fisher's exact test for each SNP.
+```{r}
+### Read in the allele count for each sample.
+snp_JE_input <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE_input.bcf.vcf", header = F, sep = "\t")
+snp_JE_input <- mutate(snp_JE_input, Pos = paste0(V1, ":", V2))
+names(snp_JE_input)[1:6] <- paste0("JE_input_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+snp_JE211101 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE211101.bcf.vcf", header = F, sep = "\t")
+snp_JE211101 <- mutate(snp_JE211101, Pos = paste0(V1, ":", V2))
+names(snp_JE211101)[1:6] <- paste0("JE211101_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+snp_JE211121 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE211121.bcf.vcf", header = F, sep = "\t")
+snp_JE211121 <- mutate(snp_JE211121, Pos = paste0(V1, ":", V2))
+names(snp_JE211121)[1:6] <- paste0("JE211121_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+snp_JE240314 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE240314.bcf.vcf", header = F, sep = "\t")
+snp_JE240314 <- mutate(snp_JE240314, Pos = paste0(V1, ":", V2))
+names(snp_JE240314)[1:6] <- paste0("JE240314_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+snp_JE240325 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE240325.bcf.vcf", header = F, sep = "\t")
+snp_JE240325 <- mutate(snp_JE240325, Pos = paste0(V1, ":", V2))
+names(snp_JE240325)[1:6] <- paste0("JE240325_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+snp_JE240404 <- read.table("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/BWA/bcftools/Allele_Count_JE240404.bcf.vcf", header = F, sep = "\t")
+snp_JE240404 <- mutate(snp_JE240404, Pos = paste0(V1, ":", V2))
+names(snp_JE240404)[1:6] <- paste0("JE240404_", c("chr", "Coordinate", "Ref", "Alt", "Ref_Count", "Alt_Count"))
+
+length(intersect(snp_JE_input$Pos, snp_JE211101$Pos))
+length(intersect(snp_JE_input$Pos, snp_JE211121$Pos))
+length(intersect(snp_JE_input$Pos, snp_JE240314$Pos))
+length(intersect(snp_JE_input$Pos, snp_JE240325$Pos))
+length(intersect(snp_JE_input$Pos, snp_JE240404$Pos))
+
+### Obtain the SNPs in all samples.
+overlap <- Reduce(intersect, list(snp_JE_input$Pos, snp_JE211101$Pos, snp_JE211121$Pos, snp_JE240314$Pos, snp_JE240325$Pos, snp_JE240404$Pos))
+
+### Create a data frame for results.
+snp_res <- data.frame(Pos = overlap)
+snp_res <- left_join(snp_res, snp_JE_input, by = "Pos")
+snp_res <- left_join(snp_res, snp_JE211101, by = "Pos")
+snp_res <- left_join(snp_res, snp_JE211121, by = "Pos")
+snp_res <- left_join(snp_res, snp_JE240314, by = "Pos")
+snp_res <- left_join(snp_res, snp_JE240325, by = "Pos")
+snp_res <- left_join(snp_res, snp_JE240404, by = "Pos")
+
+### Check if the columns are the same across samples.
+for(i in c(2,8,14,20,26,32)+3){
+  print(table(snp_res[,5]==snp_res[,i]))
+}
+
+### Reduce the redundant columns.
+snp_res <- select(snp_res, 1:7, 12:13, 18:19, 24:25, 30:31, 36:37)
+names(snp_res)[2:5] <- c("Chr", "Coordinate", "Ref", "Alt")
+snp_res$pvalue_JE211101 = 1
+snp_res$ratio_JE211101 = 1
+snp_res$pvalue_JE211121 = 1
+snp_res$ratio_JE211121 = 1
+snp_res$pvalue_JE240314 = 1
+snp_res$ratio_JE240314 = 1
+snp_res$pvalue_JE240325 = 1
+snp_res$ratio_JE240325 = 1
+snp_res$pvalue_JE240404 = 1
+snp_res$ratio_JE240404 = 1
+
+
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$JE211101_Ref_Count[i], snp_res$JE211101_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_JE211101[i] = tmp_test[["p.value"]]
+  snp_res$ratio_JE211101[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_JE211101 = p.adjust(snp_res$pvalue_JE211101)
+
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$JE211121_Ref_Count[i], snp_res$JE211121_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_JE211121[i] = tmp_test[["p.value"]]
+  snp_res$ratio_JE211121[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_JE211121 = p.adjust(snp_res$pvalue_JE211121)
+
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$JE240314_Ref_Count[i], snp_res$JE240314_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_JE240314[i] = tmp_test[["p.value"]]
+  snp_res$ratio_JE240314[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_JE240314 = p.adjust(snp_res$pvalue_JE240314)
+
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$JE240325_Ref_Count[i], snp_res$JE240325_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_JE240325[i] = tmp_test[["p.value"]]
+  snp_res$ratio_JE240325[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_JE240325 = p.adjust(snp_res$pvalue_JE240325)
+
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$JE240404_Ref_Count[i], snp_res$JE240404_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_JE240404[i] = tmp_test[["p.value"]]
+  snp_res$ratio_JE240404[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_JE240404 = p.adjust(snp_res$pvalue_JE240404)
+
+### Perform the test by combining the counts for all replicates.
+snp_res <- mutate(snp_res, combine_Ref_Count = JE211101_Ref_Count + JE211121_Ref_Count + JE240314_Ref_Count + JE240325_Ref_Count + JE240404_Ref_Count, combine_Alt_Count = JE211101_Alt_Count + JE211121_Alt_Count + JE240314_Alt_Count + JE240325_Alt_Count + JE240404_Alt_Count)
+snp_res$pvalue_combine = 1
+snp_res$ratio_combine = 1
+for(i in 1:nrow(snp_res)){
+  tmp <- c(snp_res$combine_Ref_Count[i], snp_res$combine_Alt_Count[i], snp_res$JE_input_Ref_Count[i], snp_res$JE_input_Alt_Count[i])
+  dim(tmp) <- c(2,2)
+  tmp_test <- fisher.test(tmp)
+  snp_res$pvalue_combine[i] = tmp_test[["p.value"]]
+  snp_res$ratio_combine[i] = tmp_test[["estimate"]]
+}
+snp_res$FDR_combine = p.adjust(snp_res$pvalue_combine)
+
+### Output results
+write_xlsx(snp_res, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Fisher_test_SNPs.xlsx")
+```
+
+Retain only the SNPs of interest and add the fold changes.
+```{r}
+info_snp <- select(info, 1:3, 33, 34)
+info_snp <- distinct(info_snp)
+
+library(tidyverse)
+library(stringr)
+expanded_info_snp <- info_snp %>%
+  mutate(
+    SNP_Pos_in_center = str_split(SNP_Pos_in_center, "\\|"),
+    SNP_ID_in_center = str_split(SNP_ID_in_center, "\\|")
+  ) %>%
+  unnest(cols = c(SNP_Pos_in_center, SNP_ID_in_center))
+
+expanded_info_snp <- distinct(expanded_info_snp)
+expanded_info_snp <- mutate(expanded_info_snp, Fragment = paste0(Extract_Chr, ":", Extract_Start, "_", Extract_End), Pos = paste0(Extract_Chr, ":", SNP_Pos_in_center))
+
+length(intersect(expanded_info_snp$Pos, snp_res$Pos))
+
+snp_res_fragment <- left_join(snp_res, expanded_info_snp, by = "Pos")
+
+snp_res_fragment <- left_join(snp_res_fragment, results, by = "Fragment")
+
+write_xlsx(snp_res_fragment, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Fisher_test_SNPs_with_FC.xlsx")
+
+snp_res_fragment <- read_excel("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Fisher_test_SNPs_with_FC.xlsx", sheet = 1)
+```
+
+Focus on the fragments with log2FC > 0.585 (FC > 1.5)
+```{r}
+## Calculate the proportion of the ref allele.
+snp_res_fragment <- mutate(snp_res_fragment, JE_input_Ref_per = JE_input_Ref_Count/(JE_input_Ref_Count+JE_input_Alt_Count), JE211101_Ref_per = JE211101_Ref_Count/(JE211101_Ref_Count+JE211101_Alt_Count), JE211121_Ref_per = JE211121_Ref_Count/(JE211121_Ref_Count+JE211121_Alt_Count), JE240314_Ref_per = JE240314_Ref_Count/(JE240314_Ref_Count+JE240314_Alt_Count), JE240325_Ref_per = JE240325_Ref_Count/(JE240325_Ref_Count+JE240325_Alt_Count), JE240404_Ref_per = JE240404_Ref_Count/(JE240404_Ref_Count+JE240404_Alt_Count))
+
+snp_res_fragment_sig <- filter(snp_res_fragment, Ave_Log2FC > log2(1.5))
+
+snp_res_fragment_sig <- arrange(snp_res_fragment_sig, JE_input_Ref_per)
+snp_res_fragment_sig$Order <- 1:nrow(snp_res_fragment_sig)
+
+write_xlsx(snp_res_fragment_sig, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/Fisher_test_SNPs_with_FC_Sig.xlsx")
+
+```
+
+
+```{r}
+JE_input_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE_input_Ref_per")], aes(x=Order, y=JE_input_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE_input_Ref_per), color="grey") +
+  geom_point( color="black", size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+JE211101_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE211101_Ref_per", "FDR_JE211101")], aes(x=Order, y=JE211101_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE211101_Ref_per), color="grey") +
+  geom_point(color=ifelse(snp_res_fragment_sig$FDR_JE211101<0.05 & abs(snp_res_fragment_sig$JE211101_Ref_per-snp_res_fragment_sig$JE_input_Ref_per) > 0.1, "darkred", "black"), size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())  +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+JE211121_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE211121_Ref_per")], aes(x=Order, y=JE211121_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE211121_Ref_per), color="grey") +
+  geom_point(color=ifelse(snp_res_fragment_sig$FDR_JE211121<0.05 & abs(snp_res_fragment_sig$JE211121_Ref_per-snp_res_fragment_sig$JE_input_Ref_per) > 0.1, "darkred", "black"), size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+JE240314_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE240314_Ref_per")], aes(x=Order, y=JE240314_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE240314_Ref_per), color="grey") +
+  geom_point(color=ifelse(snp_res_fragment_sig$FDR_JE240314<0.05 & abs(snp_res_fragment_sig$JE240314_Ref_per-snp_res_fragment_sig$JE_input_Ref_per) > 0.1, "darkred", "black"), size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5))+ theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())  +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+JE240325_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE240325_Ref_per")], aes(x=Order, y=JE240325_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE240325_Ref_per), color="grey") +
+  geom_point(color=ifelse(snp_res_fragment_sig$FDR_JE240325<0.05 & abs(snp_res_fragment_sig$JE240325_Ref_per-snp_res_fragment_sig$JE_input_Ref_per) > 0.1, "darkred", "black"), size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5))+ theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) + theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())  +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+JE240404_snp_plot <- ggplot(snp_res_fragment_sig[,c("Order","JE240404_Ref_per")], aes(x=Order, y=JE240404_Ref_per)) +
+  geom_segment( aes(x=Order, xend=Order, y=0, yend=JE240404_Ref_per), color="grey") +
+  geom_point(color=ifelse(snp_res_fragment_sig$FDR_JE240404<0.05 & abs(snp_res_fragment_sig$JE240404_Ref_per-snp_res_fragment_sig$JE_input_Ref_per) > 0.1, "darkred", "black"), size=6) +
+  theme_light() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  xlab("SNPs") +
+  ylab("% Ref Allele") + theme(plot.margin = margin(t = 0, r = 5, b = 0, l = 5)) +  scale_y_continuous(limits = c(0,1), breaks = seq(0, 1, 0.2))
+
+ggarrange(JE_input_snp_plot + rremove("x.text"), JE211101_snp_plot + rremove("x.text"), JE211121_snp_plot + rremove("x.text"), JE240314_snp_plot + rremove("x.text"), JE240325_snp_plot + rremove("x.text"), JE240404_snp_plot,  
+          labels = c("JE_input", "JE211101", "JE211121", "JE240314", "JE240325", "JE240404"),
+          ncol = 1, nrow = 6, heights = c(1, 1, 1, 1, 1, 1))
+ggsave("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/SNP_Ref_Per_FC1.5_Track_1.pdf", height = 10, width = 20)
+```
+
+Try another way to test the differential activity between two alleles of the same SNP:
+1) Normalize the read depth for two alleles separately for the same SNPs in the same sample.
+2) Calculate the log2FC of each allele between replicates vs input separately.
+3) Perform wilcox test for the log2FC between the two alleles for the same SNPs.
+
+Try normalizing using the total coverage across the target regions.
+```{r}
+wilcox_data <- select(snp_res_fragment, 1:17, 43, 51, 54, 57, 60, 63, 69)
+wilcox_data <- filter(wilcox_data, Ave_Log2FC > log2(1.5))
+
+## Normalize the read depth.
+wilcox_data <- mutate(wilcox_data, 
+                    JE_input_Ref_depth = (JE_input_Ref_Count+1)/5507508027, JE_input_Alt_depth = (JE_input_Alt_Count+1)/5507508027, 
+                    JE211101_Ref_depth = (JE211101_Ref_Count+1)/4740188545, JE211101_Alt_depth = (JE211101_Alt_Count+1)/4740188545, 
+                    JE211121_Ref_depth = (JE211121_Ref_Count+1)/5956659074, JE211121_Alt_depth = (JE211121_Alt_Count+1)/5956659074, 
+                    JE240314_Ref_depth = (JE240314_Ref_Count+1)/6404059844, JE240314_Alt_depth = (JE240314_Alt_Count+1)/6404059844, 
+                    JE240325_Ref_depth = (JE240325_Ref_Count+1)/5738210845, JE240325_Alt_depth = (JE240325_Alt_Count+1)/5738210845, 
+                    JE240404_Ref_depth = (JE240404_Ref_Count+1)/7254690869, JE240404_Alt_depth = (JE240404_Alt_Count+1)/7254690869)
+
+wilcox_data <- mutate(wilcox_data, 
+                      JE211101_Ref_LogFC = log2(JE211101_Ref_depth/JE_input_Ref_depth), 
+                      JE211101_Alt_LogFC = log2(JE211101_Alt_depth/JE_input_Alt_depth), 
+                      JE211121_Ref_LogFC = log2(JE211121_Ref_depth/JE_input_Ref_depth), 
+                      JE211121_Alt_LogFC = log2(JE211121_Alt_depth/JE_input_Alt_depth),                       
+                      JE240314_Ref_LogFC = log2(JE240314_Ref_depth/JE_input_Ref_depth), 
+                      JE240314_Alt_LogFC = log2(JE240314_Alt_depth/JE_input_Alt_depth),  
+                      JE240325_Ref_LogFC = log2(JE240325_Ref_depth/JE_input_Ref_depth), 
+                      JE240325_Alt_LogFC = log2(JE240325_Alt_depth/JE_input_Alt_depth), 
+                      JE240404_Ref_LogFC = log2(JE240404_Ref_depth/JE_input_Ref_depth), 
+                      JE240404_Alt_LogFC = log2(JE240404_Alt_depth/JE_input_Alt_depth))
+
+
+for(i in 1:nrow(wilcox_data)){
+  ref <- c(wilcox_data$JE211101_Ref_LogFC[i], wilcox_data$JE211121_Ref_LogFC[i], wilcox_data$JE240314_Ref_LogFC[i], wilcox_data$JE240325_Ref_LogFC[i], wilcox_data$JE240404_Ref_LogFC[i])
+  alt <- c(wilcox_data$JE211101_Alt_LogFC[i], wilcox_data$JE211121_Alt_LogFC[i], wilcox_data$JE240314_Alt_LogFC[i], wilcox_data$JE240325_Alt_LogFC[i], wilcox_data$JE240404_Alt_LogFC[i])
+  tmp_test <- t.test(ref, alt, paired = TRUE)
+  wilcox_data$pvalue[i] = tmp_test[["p.value"]]
+  wilcox_data$diff[i] = tmp_test[["estimate"]]
+  wilcox_data$Ref_LogFC_Ave[i] = mean(ref)
+  wilcox_data$Alt_LogFC_Ave[i] = mean(alt)
+}
+wilcox_data$FDR = p.adjust(wilcox_data$pvalue)
+table(wilcox_data$FDR<0.05)
+
+write_xlsx(wilcox_data, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/T_test_alleles_Norm_By_CPM.xlsx")
+
+wilcox_data_info <- left_join(wilcox_data, info, by = "Fragment")
+write_xlsx(wilcox_data_info, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/T_test_alleles_Norm_By_CPM_Info.xlsx")
+
+wilcox_data_plot <- select(wilcox_data, 1, 37:46)
+#### draw scatter plot.
+library(tidyverse)
+library(ggsignif)
+library(ggforce)
+library(paletteer)
+pdf("/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/T_test_alleles_Norm_By_CPM.pdf", width = 2, height = 3)
+for(i in 1:nrow(wilcox_data_plot)){
+  tmp = as.data.frame(t(wilcox_data_plot[i,]))
+  names(tmp) <- "value"
+  tmp = data.frame(Col= rownames(tmp), Value = tmp$value)
+  tmp = tmp[-1,]
+  tmp <- separate(tmp, Col, into = c("Sample", "Allele", "LogFC"), sep = "_")
+  tmp <- select(tmp, 1, 2, 4)
+  tmp$Value=as.numeric(tmp$Value)
+  p <- ggplot(tmp, aes(Allele, Value, group = Sample)) + geom_line(colour = "black", position=position_dodge2(width = 0.2)) + geom_point(aes(fill = Allele), shape = 21, size = 5, show.legend = FALSE, position=position_dodge2(width = 0.2), stroke = 0.8, alpha = 0.9) + scale_fill_manual(values = paletteer_d("ggpomological::pomological_palette")) + labs(y="Log2FC") + ggtitle(wilcox_data_plot[i,1]) + theme(axis.text = element_text(size = 10, colour = "black"))
+  print(p)
+}
+dev.off()
+```
+
+Try normalizing using only the reads covering the SNPs, but this appears to be the right way as some of the log2FC values are negative for the top enhancers. So should use the CPM normalization.
+```{r}
+wilcox_data <- select(snp_res_fragment, 1:17, 43, 51, 54, 57, 60, 63, 69)
+wilcox_data <- filter(wilcox_data, Ave_Log2FC > log2(1.5))
+
+## Normalize the read depth.
+wilcox_data <- mutate(wilcox_data, 
+JE_input_Ref_depth = (JE_input_Ref_Count+1)/sum(c(wilcox_data$JE_input_Ref_Count, wilcox_data$JE_input_Alt_Count)),
+JE_input_Alt_depth = (JE_input_Alt_Count+1)/sum(c(wilcox_data$JE_input_Ref_Count, wilcox_data$JE_input_Alt_Count)),
+
+JE211101_Ref_depth = (JE211101_Ref_Count+1)/sum(c(wilcox_data$JE211101_Ref_Count, wilcox_data$JE211101_Alt_Count)),
+JE211101_Alt_depth = (JE211101_Alt_Count+1)/sum(c(wilcox_data$JE211101_Ref_Count, wilcox_data$JE211101_Alt_Count)),
+
+JE211121_Ref_depth = (JE211121_Ref_Count+1)/sum(c(wilcox_data$JE211121_Ref_Count, wilcox_data$JE211121_Alt_Count)),
+JE211121_Alt_depth = (JE211121_Alt_Count+1)/sum(c(wilcox_data$JE211121_Ref_Count, wilcox_data$JE211121_Alt_Count)),
+
+JE240314_Ref_depth = (JE240314_Ref_Count+1)/sum(c(wilcox_data$JE240314_Ref_Count, wilcox_data$JE240314_Alt_Count)),
+JE240314_Alt_depth = (JE240314_Alt_Count+1)/sum(c(wilcox_data$JE240314_Ref_Count, wilcox_data$JE240314_Alt_Count)),
+
+JE240325_Ref_depth = (JE240325_Ref_Count+1)/sum(c(wilcox_data$JE240325_Ref_Count, wilcox_data$JE240325_Alt_Count)),
+JE240325_Alt_depth = (JE240325_Alt_Count+1)/sum(c(wilcox_data$JE240325_Ref_Count, wilcox_data$JE240325_Alt_Count)),
+
+JE240404_Ref_depth = (JE240404_Ref_Count+1)/sum(c(wilcox_data$JE240404_Ref_Count, wilcox_data$JE240404_Alt_Count)),
+JE240404_Alt_depth = (JE240404_Alt_Count+1)/sum(c(wilcox_data$JE240404_Ref_Count, wilcox_data$JE240404_Alt_Count)))
+
+wilcox_data <- mutate(wilcox_data, 
+                      JE211101_Ref_LogFC = log2(JE211101_Ref_depth/JE_input_Ref_depth), 
+                      JE211101_Alt_LogFC = log2(JE211101_Alt_depth/JE_input_Alt_depth), 
+                      JE211121_Ref_LogFC = log2(JE211121_Ref_depth/JE_input_Ref_depth), 
+                      JE211121_Alt_LogFC = log2(JE211121_Alt_depth/JE_input_Alt_depth),                       
+                      JE240314_Ref_LogFC = log2(JE240314_Ref_depth/JE_input_Ref_depth), 
+                      JE240314_Alt_LogFC = log2(JE240314_Alt_depth/JE_input_Alt_depth),  
+                      JE240325_Ref_LogFC = log2(JE240325_Ref_depth/JE_input_Ref_depth), 
+                      JE240325_Alt_LogFC = log2(JE240325_Alt_depth/JE_input_Alt_depth), 
+                      JE240404_Ref_LogFC = log2(JE240404_Ref_depth/JE_input_Ref_depth), 
+                      JE240404_Alt_LogFC = log2(JE240404_Alt_depth/JE_input_Alt_depth))
+
+
+for(i in 1:nrow(wilcox_data)){
+  ref <- c(wilcox_data$JE211101_Ref_LogFC[i], wilcox_data$JE211121_Ref_LogFC[i], wilcox_data$JE240314_Ref_LogFC[i], wilcox_data$JE240325_Ref_LogFC[i], wilcox_data$JE240404_Ref_LogFC[i])
+  alt <- c(wilcox_data$JE211101_Alt_LogFC[i], wilcox_data$JE211121_Alt_LogFC[i], wilcox_data$JE240314_Alt_LogFC[i], wilcox_data$JE240325_Alt_LogFC[i], wilcox_data$JE240404_Alt_LogFC[i])
+  tmp_test <- t.test(ref, alt, paired = TRUE)
+  wilcox_data$pvalue[i] = tmp_test[["p.value"]]
+  wilcox_data$diff[i] = tmp_test[["estimate"]]
+  wilcox_data$Ref_LogFC_Ave[i] = mean(ref)
+  wilcox_data$Alt_LogFC_Ave[i] = mean(alt)
+}
+wilcox_data$FDR = p.adjust(wilcox_data$pvalue)
+table(wilcox_data$FDR<0.05)
+
+write_xlsx(wilcox_data, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/T_test_alleles_Norm_By_SNP_Reads.xlsx")
+
+wilcox_data_info <- left_join(wilcox_data, info, by = "Fragment")
+write_xlsx(wilcox_data_info, "/gau/isilon/int/xzhang/Pacemaker/STARR_seq/Control_Regions_Included/T_test_alleles_Norm_By_SNP_Reads_Info.xlsx")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
